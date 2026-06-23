@@ -1,0 +1,125 @@
+From 05c5a729f29b4ac42a41a714b93daa9b98c00cbf Mon Sep 17 00:00:00 2001
+From: Chisheng Chen <johnny1001s000602@gmail.com>
+Date: Tue, 28 Apr 2026 00:01:42 +0800
+Subject: [PATCH 5/9] Fix touchscreen busy error
+
+---
+ arch/arm/boot/dts/st/stm32f4-pinctrl.dtsi |  4 +--
+ drivers/i2c/busses/i2c-stm32f4.c          | 31 ++++++++++++++++++++---
+ drivers/input/touchscreen/stmpe-ts.c      |  8 ++++--
+ 3 files changed, 36 insertions(+), 7 deletions(-)
+
+diff --git a/arch/arm/boot/dts/st/stm32f4-pinctrl.dtsi b/arch/arm/boot/dts/st/stm32f4-pinctrl.dtsi
+index d34ad52c7..befe48909 100644
+--- a/arch/arm/boot/dts/st/stm32f4-pinctrl.dtsi
++++ b/arch/arm/boot/dts/st/stm32f4-pinctrl.dtsi
+@@ -420,7 +420,7 @@ pins {
+ 			sdio_pins: sdio-pins-0 {
+ 				pins {
+ 					pinmux = <STM32_PINMUX('C', 8, AF12)>, /* SDIO_D0 */
+-						 <STM32_PINMUX('C', 9, AF12)>, /* SDIO_D1 */
++						//  <STM32_PINMUX('C', 9, AF12)>, /* SDIO_D1 */
+ 						//  <STM32_PINMUX('C', 10, AF12)>, /* SDIO_D2 */
+ 						 <STM32_PINMUX('C', 11, AF12)>, /* SDIO_D3 */
+ 						 <STM32_PINMUX('C', 12, AF12)>, /* SDIO_CK */
+@@ -433,7 +433,7 @@ pins {
+ 			sdio_pins_od: sdio-pins-od-0 {
+ 				pins1 {
+ 					pinmux = <STM32_PINMUX('C', 8, AF12)>, /* SDIO_D0 */
+-						 <STM32_PINMUX('C', 9, AF12)>, /* SDIO_D1 */
++						//  <STM32_PINMUX('C', 9, AF12)>, /* SDIO_D1 */
+ 						//  <STM32_PINMUX('C', 10, AF12)>, /* SDIO_D2 */
+ 						 <STM32_PINMUX('C', 11, AF12)>, /* SDIO_D3 */
+ 						 <STM32_PINMUX('C', 12, AF12)>; /* SDIO_CK */
+diff --git a/drivers/i2c/busses/i2c-stm32f4.c b/drivers/i2c/busses/i2c-stm32f4.c
+index b3d56d0aa..4c88ef890 100644
+--- a/drivers/i2c/busses/i2c-stm32f4.c
++++ b/drivers/i2c/busses/i2c-stm32f4.c
+@@ -41,6 +41,7 @@
+ #define STM32F4_I2C_FLTR		0x24
+ 
+ /* STM32F4 I2C control 1*/
++#define STM32F4_I2C_CR1_SWRST	BIT(15)
+ #define STM32F4_I2C_CR1_POS		BIT(11)
+ #define STM32F4_I2C_CR1_ACK		BIT(10)
+ #define STM32F4_I2C_CR1_STOP		BIT(9)
+@@ -710,9 +711,10 @@ static int stm32f4_i2c_xfer_msg(struct stm32f4_i2c_dev *i2c_dev,
+ 						i2c_dev->adap.timeout);
+ 	ret = f4_msg->result;
+ 
+-	if (!time_left)
+-		ret = -ETIMEDOUT;
+-
++	if (!time_left) {
++        i2c_recover_bus(&i2c_dev->adap);
++        ret = -ETIMEDOUT;
++    }
+ 	return ret;
+ }
+ 
+@@ -753,6 +755,28 @@ static const struct i2c_algorithm stm32f4_i2c_algo = {
+ 	.functionality = stm32f4_i2c_func,
+ };
+ 
++static void stm32f4_i2c_prepare_recovery(struct i2c_adapter *adap)
++{
++    struct stm32f4_i2c_dev *i2c_dev = i2c_get_adapdata(adap);
++    stm32f4_i2c_disable_irq(i2c_dev);
++}
++
++static void stm32f4_i2c_unprepare_recovery(struct i2c_adapter *adap)
++{
++    struct stm32f4_i2c_dev *i2c_dev = i2c_get_adapdata(adap);
++    void *reg = i2c_dev->base + STM32F4_I2C_CR1;
++    stm32f4_i2c_set_bits(reg, STM32F4_I2C_CR1_SWRST);
++    udelay(2);
++    stm32f4_i2c_clr_bits(reg, STM32F4_I2C_CR1_SWRST);
++    stm32f4_i2c_hw_config(i2c_dev);
++}
++
++static struct i2c_bus_recovery_info stm32f4_i2c_bus_recovery_info = {
++    .recover_bus = i2c_generic_scl_recovery,
++    .prepare_recovery = stm32f4_i2c_prepare_recovery,
++    .unprepare_recovery = stm32f4_i2c_unprepare_recovery,
++};
++
+ static int stm32f4_i2c_probe(struct platform_device *pdev)
+ {
+ 	struct device_node *np = pdev->dev.of_node;
+@@ -834,6 +858,7 @@ static int stm32f4_i2c_probe(struct platform_device *pdev)
+ 	adap->algo = &stm32f4_i2c_algo;
+ 	adap->dev.parent = &pdev->dev;
+ 	adap->dev.of_node = pdev->dev.of_node;
++    adap->bus_recovery_info = &stm32f4_i2c_bus_recovery_info;
+ 
+ 	init_completion(&i2c_dev->complete);
+ 
+diff --git a/drivers/input/touchscreen/stmpe-ts.c b/drivers/input/touchscreen/stmpe-ts.c
+index af0fb38bc..5dc474ef3 100644
+--- a/drivers/input/touchscreen/stmpe-ts.c
++++ b/drivers/input/touchscreen/stmpe-ts.c
+@@ -31,7 +31,7 @@
+ #define STMPE_REG_FIFO_TH		0x4A
+ #define STMPE_REG_FIFO_STA		0x4B
+ #define STMPE_REG_FIFO_SIZE		0x4C
+-#define STMPE_REG_TSC_DATA_XYZ		0x52
++#define STMPE_REG_TSC_DATA_XYZ_INC	0xD7
+ #define STMPE_REG_TSC_FRACTION_Z	0x56
+ #define STMPE_REG_TSC_I_DRIVE		0x58
+ 
+@@ -147,7 +147,11 @@ static irqreturn_t stmpe_ts_handler(int irq, void *data)
+ 	stmpe_set_bits(ts->stmpe, STMPE_REG_TSC_CTRL,
+ 				STMPE_TSC_CTRL_TSC_EN, 0);
+ 
+-	stmpe_block_read(ts->stmpe, STMPE_REG_TSC_DATA_XYZ, 4, data_set);
++	data_set[0] = stmpe_reg_read(ts->stmpe, STMPE_REG_TSC_DATA_XYZ_INC);
++	data_set[1] = stmpe_reg_read(ts->stmpe, STMPE_REG_TSC_DATA_XYZ_INC);
++	data_set[2] = stmpe_reg_read(ts->stmpe, STMPE_REG_TSC_DATA_XYZ_INC);
++	data_set[3] = stmpe_reg_read(ts->stmpe, STMPE_REG_TSC_DATA_XYZ_INC);
++
+ 
+ 	x = (data_set[0] << 4) | (data_set[1] >> 4);
+ 	y = ((data_set[1] & 0xf) << 8) | data_set[2];
+-- 
+2.43.0
+

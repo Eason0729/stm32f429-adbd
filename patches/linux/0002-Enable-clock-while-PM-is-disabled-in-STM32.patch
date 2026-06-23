@@ -1,0 +1,91 @@
+From 21e1281470454852f22a84fcc048d2b1679860e3 Mon Sep 17 00:00:00 2001
+From: Chisheng Chen <johnny1001s000602@gmail.com>
+Date: Mon, 27 Apr 2026 22:44:04 +0800
+Subject: [PATCH 2/9] Enable clock while PM is disabled in STM32
+
+---
+ drivers/char/hw_random/stm32-rng.c | 12 +++++++++++-
+ drivers/gpu/drm/stm/ltdc.c         | 21 +++++++++++++++------
+ 2 files changed, 26 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/char/hw_random/stm32-rng.c b/drivers/char/hw_random/stm32-rng.c
+index 9a8c00586..e07e85244 100644
+--- a/drivers/char/hw_random/stm32-rng.c
++++ b/drivers/char/hw_random/stm32-rng.c
+@@ -363,11 +363,20 @@ static int stm32_rng_init(struct hwrng *rng)
+ 		return -EINVAL;
+ 	}
+ 
+-	clk_bulk_disable_unprepare(priv->data->nb_clock, priv->clk_bulk);
++    if (IS_ENABLED(CONFIG_PM))
++        clk_bulk_disable_unprepare(priv->data->nb_clock, priv->clk_bulk);
+ 
+ 	return 0;
+ }
+ 
++static void stm32_rng_cleanup(struct hwrng *rng)
++{
++		struct stm32_rng_private *priv =
++			container_of(rng, struct stm32_rng_private, rng);
++		if (!IS_ENABLED(CONFIG_PM))
++		clk_bulk_disable_unprepare(priv->data->nb_clock, priv->clk_bulk);
++}
++
+ static void stm32_rng_remove(struct platform_device *ofdev)
+ {
+ 	pm_runtime_disable(&ofdev->dev);
+@@ -563,6 +572,7 @@ static int stm32_rng_probe(struct platform_device *ofdev)
+ 
+ 	priv->rng.name = dev_driver_string(dev);
+ 	priv->rng.init = stm32_rng_init;
++    priv->rng.cleanup = stm32_rng_cleanup;
+ 	priv->rng.read = stm32_rng_read;
+ 	priv->rng.quality = 900;
+ 
+diff --git a/drivers/gpu/drm/stm/ltdc.c b/drivers/gpu/drm/stm/ltdc.c
+index f7e847cfa..f0a07ff4d 100644
+--- a/drivers/gpu/drm/stm/ltdc.c
++++ b/drivers/gpu/drm/stm/ltdc.c
+@@ -2080,14 +2080,16 @@ int ltdc_load(struct drm_device *ddev)
+ 		goto err;
+ 	}
+ 
+-	clk_disable_unprepare(ldev->pixel_clk);
++	if (IS_ENABLED(CONFIG_PM)) {
++		clk_disable_unprepare(ldev->pixel_clk);
+ 
+-	if (ldev->bus_clk)
+-		clk_disable_unprepare(ldev->bus_clk);
++		if (ldev->bus_clk)
++			clk_disable_unprepare(ldev->bus_clk);
+ 
+-	pinctrl_pm_select_sleep_state(ddev->dev);
++			pinctrl_pm_select_sleep_state(ddev->dev);
+ 
+-	pm_runtime_enable(ddev->dev);
++		pm_runtime_enable(ddev->dev);
++    }
+ 
+ 	return 0;
+ err:
+@@ -2101,9 +2103,16 @@ int ltdc_load(struct drm_device *ddev)
+ 
+ void ltdc_unload(struct drm_device *ddev)
+ {
++	struct ltdc_device *ldev = ddev->dev_private;
+ 	drm_dbg_driver(ddev, "\n");
+ 
+-	pm_runtime_disable(ddev->dev);
++	if (IS_ENABLED(CONFIG_PM))
++		pm_runtime_disable(ddev->dev);
++	else {
++		clk_disable_unprepare(ldev->pixel_clk);
++		if (ldev->bus_clk)
++			clk_disable_unprepare(ldev->bus_clk);
++	}
+ }
+ 
+ MODULE_AUTHOR("Philippe Cornu <philippe.cornu@st.com>");
+-- 
+2.43.0
+

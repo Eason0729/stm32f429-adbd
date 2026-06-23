@@ -1,0 +1,61 @@
+From: stm32f429-adbd
+Date: Wed, 17 Jun 2026 00:00:00 +0800
+Subject: Modify linux.mk
+
+---
+--- a/linux/linux.mk	2026-03-04 16:11:17.000000000 +0800
++++ b/linux/linux.mk	2026-06-17 17:15:50.267044296 +0800
+@@ -686,6 +686,52 @@
+ 
+ endif # BR_BUILDING
+ 
++REQUIRED_CONFIG_SET= \
++	CONFIG_ARCH_STM32 \
++	CONFIG_MACH_STM32F429 \
++	CONFIG_LD_DEAD_CODE_DATA_ELIMINATION \
++	CONFIG_CC_OPTIMIZE_FOR_SIZE \
++	CONFIG_XIP_KERNEL \
++	CONFIG_SERIAL_STM32 \
++	CONFIG_SERIAL_STM32_CONSOLE \
++	CONFIG_SYSFS \
++	CONFIG_USB_GADGET \
++	CONFIG_USB_DWC2 \
++	CONFIG_USB_DWC2_PERIPHERAL \
++	CONFIG_USB_LIBCOMPOSITE \
++	CONFIG_USB_F_FS \
++	CONFIG_USB_CONFIGFS \
++	CONFIG_USB_CONFIGFS_F_FS \
++	CONFIG_CONFIGFS_FS \
++	CONFIG_MMC_SPI
++
++
++REQUIRED_CONFIG_UNSET= \
++	CONFIG_MMU \
++	CONFIG_MACH_STM32F469 \
++	CONFIG_MACH_STM32F746 \
++	CONFIG_MACH_STM32F769 \
++	CONFIG_MACH_STM32H743 \
++	CONFIG_MMC_ARMMMCI
++
++define POST_OLDDEFCONFIG_ASSERTION
++	@echo "post-olddefconfig check"
++	@for conf in $(REQUIRED_CONFIG_SET); do \
++		if ! grep -q "^$$conf=y" $(LINUX_DIR)/.config; then \
++			echo "$$conf should be set in $(LINUX_DIR)/.config"; \
++			exit 1; \
++		fi; \
++	done
++	@for conf in $(REQUIRED_CONFIG_UNSET); do \
++		if grep -q "^$$conf=y" $(LINUX_DIR)/.config; then \
++			echo "$$conf should not set in $(LINUX_DIR)/.config"; \
++			exit 1; \
++		fi; \
++	done
++endef
++
++LINUX_POST_CONFIGURE_HOOKS += POST_OLDDEFCONFIG_ASSERTION
++
+ $(eval $(kconfig-package))
+ 
+ # Support for rebuilding the kernel after the cpio archive has
+

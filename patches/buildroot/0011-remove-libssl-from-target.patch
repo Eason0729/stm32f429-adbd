@@ -1,0 +1,26 @@
+From: stm32f429-adbd
+Date: Fri, 19 Jun 2026 18:30:00 +0800
+Subject: Remove libssl from target
+
+---
+ .../common/stm32f4xx/stm32-post-build.sh      | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh b/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
+index c9b43947..319f3bf1 100755
+--- a/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
++++ b/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
+@@ -15,6 +15,11 @@ if [ -d "${TARGET_DIR}/lib" ]; then
+     rm -f "${TARGET_DIR}/lib/libgcc_s.so"*
+ fi
+ 
++# adbd does not use SSL/TLS — remove libssl to save ~860 KB on target
++rm -f "${TARGET_DIR}/usr/lib/libssl.so"*
++rm -f "${TARGET_DIR}/usr/lib/ossl-modules/legacy.so"
++rmdir "${TARGET_DIR}/usr/lib/ossl-modules" 2>/dev/null || true
++
+ TARGET_STRIP="${TARGET_DIR}/../host/bin/arm-buildroot-uclinuxfdpiceabi-strip"
+ if [ -x "${TARGET_STRIP}" ]; then
+     if [ -d "${TARGET_DIR}/lib" ]; then
+-- 
+2.43.0

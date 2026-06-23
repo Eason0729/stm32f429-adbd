@@ -1,0 +1,847 @@
+From f26e7346a0ab6cfa1a293880b4e9497349a8d98d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E9=82=B1=E7=B9=BC=E5=8F=A1=20Eason=20CHIU?=
+ <30045503+Eason0729@users.noreply.github.com>
+Date: Sat, 20 Jun 2026 12:32:03 +0800
+Subject: [PATCH 2/8] reduce memory usage by adjusting buffer size and disable
+ auth
+
+---
+ adb/adb.cpp                      |   9 +++
+ adb/adb.h                        |   4 +
+ adb/adb_auth_client.cpp          |  96 +++++++++++++++++-------
+ adb/diagnose_usb.cpp             |  15 +++-
+ adb/file_sync_service.cpp        |   8 ++
+ adb/file_sync_service.h          |   4 +
+ adb/framebuffer_service.cpp      |  26 +++++++
+ adb/shell_service.cpp            | 124 ++++++++++++++++++++++++++++++-
+ adb/sysdeps.h                    |   9 +++
+ adb/usb_linux_client.cpp         |   8 ++
+ include/cutils/jstring.h         |   6 +-
+ libcrypto_utils/android_pubkey.c | 108 ++++++++-------------------
+ 12 files changed, 309 insertions(+), 108 deletions(-)
+
+diff --git a/adb/adb.cpp b/adb/adb.cpp
+index 725aa9193..cfb4e7e8a 100644
+--- a/adb/adb.cpp
++++ b/adb/adb.cpp
+@@ -48,7 +48,9 @@
+ 
+ #if !ADB_HOST
+ #include <cutils/properties.h>
++#if !defined(ADB_NOMMU)
+ #include <sys/capability.h>
++#endif
+ #include <sys/mount.h>
+ #endif
+ 
+@@ -851,6 +853,12 @@ int launch_server(int server_port)
+         return -1;
+     }
+ #else /* !defined(_WIN32) */
++#if defined(ADB_NOMMU)
++    // On noMMU Linux we cannot fork() to start a detached adb server. This
++    // host-only code path is never reached by the adbd daemon, so just refuse.
++    fprintf(stderr, "launch_server not supported on noMMU\n");
++    return -1;
++#else
+     char    path[PATH_MAX];
+     int     fd[2];
+ 
+@@ -897,6 +905,7 @@ int launch_server(int server_port)
+             return -1;
+         }
+     }
++#endif /* ADB_NOMMU */
+ #endif /* !defined(_WIN32) */
+     return 0;
+ }
+diff --git a/adb/adb.h b/adb/adb.h
+index 9227eb172..ea84db508 100644
+--- a/adb/adb.h
++++ b/adb/adb.h
+@@ -30,7 +30,11 @@
+ 
+ constexpr size_t MAX_PAYLOAD_V1 = 4 * 1024;
+ constexpr size_t MAX_PAYLOAD_V2 = 256 * 1024;
++#if defined(ADB_NOMMU)
++constexpr size_t MAX_PAYLOAD = MAX_PAYLOAD_V1;
++#else
+ constexpr size_t MAX_PAYLOAD = MAX_PAYLOAD_V2;
++#endif
+ 
+ #define A_SYNC 0x434e5953
+ #define A_CNXN 0x4e584e43
+diff --git a/adb/adb_auth_client.cpp b/adb/adb_auth_client.cpp
+index 415ab8ed3..4d1ae3602 100644
+--- a/adb/adb_auth_client.cpp
++++ b/adb/adb_auth_client.cpp
+@@ -23,11 +23,41 @@
+ #include <stdio.h>
+ #include <string.h>
+ 
++#if !defined(ADB_NOMMU)
+ #include <openssl/obj_mac.h>
+ #include <openssl/rsa.h>
+ #include <openssl/sha.h>
+-
+ #include <crypto_utils/android_pubkey.h>
++#endif
++
++#if defined(ADB_NOMMU) && !defined(ADB_NOMMU_NO_CRYPTO)
++/* Simple base64 decode replacement for __b64_pton (BSD libc) on uClibc. */
++static int adb_b64_pton(const char *in, uint8_t *out, int outlen) {
++    static int8_t tbl[256];
++    static int tbl_init;
++    if (!tbl_init) {
++        memset(tbl, -1, sizeof(tbl));
++        const char *chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++        for (int i = 0; i < 64; i++) tbl[(unsigned char)chars[i]] = i;
++        tbl_init = 1;
++    }
++    int val = 0, bits = 0, idx = 0;
++    for (; *in; in++) {
++        int8_t d = tbl[(unsigned char)*in];
++        if (d == -1) continue;
++        val = (val << 6) | d;
++        bits += 6;
++        if (bits >= 8) {
++            bits -= 8;
++            if (idx >= outlen) return -1;
++            out[idx++] = (val >> bits) & 0xFF;
++        }
++    }
++    return idx;
++}
++#else
++#define adb_b64_pton(in, out, len) __b64_pton(in, out, len)
++#endif
+ 
+ #include "cutils/list.h"
+ #include "cutils/sockets.h"
+@@ -36,6 +66,17 @@
+ #include "fdevent.h"
+ #include "transport.h"
+ 
++static fdevent listener_fde;
++static fdevent framework_fde;
++static int framework_fd = -1;
++
++static void usb_disconnected(void* unused, atransport* t);
++static struct adisconnect usb_disconnect = { usb_disconnected, nullptr};
++static atransport* usb_transport;
++static bool needs_retry = false;
++
++#if !defined(ADB_NOMMU)
++
+ struct adb_public_key {
+     struct listnode node;
+     RSA* key;
+@@ -47,15 +88,6 @@ static const char *key_paths[] = {
+     NULL
+ };
+ 
+-static fdevent listener_fde;
+-static fdevent framework_fde;
+-static int framework_fd = -1;
+-
+-static void usb_disconnected(void* unused, atransport* t);
+-static struct adisconnect usb_disconnect = { usb_disconnected, nullptr};
+-static atransport* usb_transport;
+-static bool needs_retry = false;
+-
+ static void read_keys(const char *file, struct listnode *list)
+ {
+     FILE *f;
+@@ -81,10 +113,8 @@ static void read_keys(const char *file, struct listnode *list)
+         if (sep)
+             *sep = '\0';
+ 
+-        // b64_pton requires one additional byte in the target buffer for
+-        // decoding to succeed. See http://b/28035006 for details.
+         uint8_t keybuf[ANDROID_PUBKEY_ENCODED_SIZE + 1];
+-        ret = __b64_pton(buf, keybuf, sizeof(keybuf));
++        ret = adb_b64_pton(buf, keybuf, sizeof(keybuf));
+         if (ret != ANDROID_PUBKEY_ENCODED_SIZE) {
+             D("%s: Invalid base64 data ret=%d", file, ret);
+             free(key);
+@@ -132,21 +162,6 @@ static void load_keys(struct listnode *list)
+     }
+ }
+ 
+-int adb_auth_generate_token(void *token, size_t token_size)
+-{
+-    FILE *f;
+-    int ret;
+-
+-    f = fopen("/dev/urandom", "re");
+-    if (!f)
+-        return 0;
+-
+-    ret = fread(token, token_size, 1, f);
+-
+-    fclose(f);
+-    return ret * token_size;
+-}
+-
+ int adb_auth_verify(uint8_t* token, size_t token_size, uint8_t* sig, int siglen)
+ {
+     struct listnode *item;
+@@ -167,6 +182,31 @@ int adb_auth_verify(uint8_t* token, size_t token_size, uint8_t* sig, int siglen)
+     return ret;
+ }
+ 
++#else // ADB_NOMMU — no crypto, deny all verification
++
++int adb_auth_verify(uint8_t* token, size_t token_size, uint8_t* sig, int siglen)
++{
++    (void)token; (void)token_size; (void)sig; (void)siglen;
++    return 0;
++}
++
++#endif
++
++int adb_auth_generate_token(void *token, size_t token_size)
++{
++    FILE *f;
++    int ret;
++
++    f = fopen("/dev/urandom", "re");
++    if (!f)
++        return 0;
++
++    ret = fread(token, token_size, 1, f);
++
++    fclose(f);
++    return ret * token_size;
++}
++
+ static void usb_disconnected(void* unused, atransport* t) {
+     D("USB disconnect");
+     usb_transport = NULL;
+diff --git a/adb/diagnose_usb.cpp b/adb/diagnose_usb.cpp
+index 0f067b0ec..d76ccd4b7 100644
+--- a/adb/diagnose_usb.cpp
++++ b/adb/diagnose_usb.cpp
+@@ -20,6 +20,7 @@
+ #include <unistd.h>
+ 
+ #include <string>
++#include <vector>
+ 
+ #include <android-base/stringprintf.h>
+ 
+@@ -46,7 +47,19 @@ static const char* GetUdevProblem() {
+ 
+     // getgroups(2) indicates that the group_member() may not check the egid so we check it
+     // additionally just to be sure.
+-    if (group_member(plugdev_group->gr_gid) || getegid() == plugdev_group->gr_gid) {
++    gid_t gid = plugdev_group->gr_gid;
++    bool in_group = (getegid() == gid);
++    if (!in_group) {
++        int n = getgroups(0, nullptr);
++        if (n > 0) {
++            std::vector<gid_t> groups(n);
++            getgroups(n, groups.data());
++            for (int i = 0; i < n; ++i) {
++                if (groups[i] == gid) { in_group = true; break; }
++            }
++        }
++    }
++    if (in_group) {
+         // The user is in plugdev so the problem is likely with the udev rules.
+         return "verify udev rules";
+     }
+diff --git a/adb/file_sync_service.cpp b/adb/file_sync_service.cpp
+index 31d3494f2..a686f0705 100644
+--- a/adb/file_sync_service.cpp
++++ b/adb/file_sync_service.cpp
+@@ -26,8 +26,10 @@
+ #include <string.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#ifndef ADB_NON_ANDROID
+ #include <sys/xattr.h>
+ #include <linux/xattr.h>
++#endif
+ #include <unistd.h>
+ #include <utime.h>
+ 
+@@ -53,6 +55,7 @@ static bool should_use_fs_config(const std::string& path) {
+ }
+ #endif
+ 
++#if !ADB_NON_ANDROID
+ static bool update_capabilities(const char* path, uint64_t capabilities) {
+     if (capabilities == 0) {
+         // Ensure we clean up in case the capabilities weren't 0 in the past.
+@@ -68,6 +71,7 @@ static bool update_capabilities(const char* path, uint64_t capabilities) {
+     cap_data.data[1].inheritable = 0;
+     return setxattr(path, XATTR_NAME_CAPS, &cap_data, sizeof(cap_data), 0) != -1;
+ }
++#endif
+ 
+ static bool secure_mkdirs(const std::string& path) {
+     uid_t uid = -1;
+@@ -100,7 +104,9 @@ static bool secure_mkdirs(const std::string& path) {
+             selinux_android_restorecon(partial_path.c_str(), 0);
+ #endif
+ 
++#if !ADB_NON_ANDROID
+             if (!update_capabilities(partial_path.c_str(), capabilities)) return false;
++#endif
+         }
+     }
+     return true;
+@@ -209,10 +215,12 @@ static bool handle_send_file(int s, const char* path, uid_t uid, gid_t gid, uint
+         // by all filesystems, so we don't check for success. b/12441485
+         fchmod(fd, mode);
+ 
++#if !ADB_NON_ANDROID
+         if (!update_capabilities(path, capabilities)) {
+             SendSyncFailErrno(s, "update_capabilities failed");
+             goto fail;
+         }
++#endif
+     }
+ 
+     while (true) {
+diff --git a/adb/file_sync_service.h b/adb/file_sync_service.h
+index 460e9dc03..432be8d29 100644
+--- a/adb/file_sync_service.h
++++ b/adb/file_sync_service.h
+@@ -71,6 +71,10 @@ bool do_sync_pull(const std::vector<const char*>& srcs, const char* dst,
+ 
+ bool do_sync_sync(const std::string& lpath, const std::string& rpath, bool list_only);
+ 
++#if defined(ADB_NOMMU)
++#define SYNC_DATA_MAX (4*1024)
++#else
+ #define SYNC_DATA_MAX (64*1024)
++#endif
+ 
+ #endif
+diff --git a/adb/framebuffer_service.cpp b/adb/framebuffer_service.cpp
+index 7baad8b72..dde4c157a 100644
+--- a/adb/framebuffer_service.cpp
++++ b/adb/framebuffer_service.cpp
+@@ -17,6 +17,7 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <linux/fb.h>
++#include <spawn.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -66,6 +67,30 @@ void framebuffer_service(int fd, void *cookie)
+ 
+     if (pipe2(fds, O_CLOEXEC) < 0) goto pipefail;
+ 
++#if defined(ADB_NOMMU)
++    {
++        // On noMMU we cannot fork(); use posix_spawn with file-actions to
++        // wire screencap's stdout to fds[1] and close both pipe ends in the
++        // child.
++        posix_spawn_file_actions_t actions;
++        posix_spawnattr_t attrs;
++        if (posix_spawn_file_actions_init(&actions) != 0) goto done;
++        posix_spawnattr_init(&attrs);
++        posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
++        posix_spawn_file_actions_addclose(&actions, fds[0]);
++        posix_spawn_file_actions_addclose(&actions, fds[1]);
++        const char* command = "screencap";
++        char* const argv[] = {const_cast<char*>(command), nullptr};
++        extern char** environ;
++        int spawn_err = posix_spawn(&pid, command, &actions, &attrs, argv, environ);
++        posix_spawn_file_actions_destroy(&actions);
++        posix_spawnattr_destroy(&attrs);
++        if (spawn_err != 0) {
++            pid = -1;
++            goto done;
++        }
++    }
++#else
+     pid = fork();
+     if (pid < 0) goto done;
+ 
+@@ -78,6 +103,7 @@ void framebuffer_service(int fd, void *cookie)
+         execvp(command, (char**)args);
+         exit(1);
+     }
++#endif
+ 
+     adb_close(fds[1]);
+     fd_screencap = fds[0];
+diff --git a/adb/shell_service.cpp b/adb/shell_service.cpp
+index 3c9b02ed8..d5c9b297c 100644
+--- a/adb/shell_service.cpp
++++ b/adb/shell_service.cpp
+@@ -84,6 +84,7 @@
+ #include <errno.h>
+ #include <pty.h>
+ #include <pwd.h>
++#include <spawn.h>
+ #include <sys/select.h>
+ #include <termios.h>
+ 
+@@ -105,11 +106,25 @@
+ 
+ namespace {
+ 
++// On noMMU Linux we cannot use fork()/forkpty() because there is no MMU to
++// copy-on-write the address space. Instead we use posix_spawn(), which on
++// uClibc/musl is implemented over vfork() and handles the FD-table hand-off
++// atomically. All child-side setup (dup2 of std fds, closing parent-side FDs)
++// must be expressed via posix_spawn_file_actions_t instead of being done in
++// the child process body, since under vfork the child shares the parent's
++// memory and FD table until execve().
++#if defined(ADB_NOMMU)
++#define ADB_USE_POSIX_SPAWN 1
++#endif
++
+ void init_subproc_child()
+ {
+     setsid();
+ 
+-    // Set OOM score adjustment to prevent killing
++    // Set OOM score adjustment to prevent killing. Skipped on noMMU since
++    // the child runs in the parent's address space until exec; the daemon
++    // itself should not have its OOM score lowered here.
++#if !defined(ADB_NOMMU)
+     int fd = adb_open("/proc/self/oom_score_adj", O_WRONLY | O_CLOEXEC);
+     if (fd >= 0) {
+         adb_write(fd, "0", 1);
+@@ -117,6 +132,7 @@ void init_subproc_child()
+     } else {
+        D("adb: unable to update oom_score_adj");
+     }
++#endif
+ }
+ 
+ // Reads from |fd| until close or failure.
+@@ -241,12 +257,15 @@ bool Subprocess::ForkAndExec(std::string* error) {
+ 
+     // Create a socketpair for the fork() child to report any errors back to the parent. Since we
+     // use threads, logging directly from the child might deadlock due to locks held in another
+-    // thread during the fork.
++    // thread during the fork. On noMMU we use posix_spawn, which reports exec failures via its
++    // return value, so this channel is not needed.
++#if !defined(ADB_NOMMU)
+     if (!CreateSocketpair(&parent_error_sfd, &child_error_sfd)) {
+         *error = android::base::StringPrintf(
+             "failed to create pipe for subprocess error reporting: %s", strerror(errno));
+         return false;
+     }
++#endif
+ 
+     // Construct the environment for the child before we fork.
+     passwd* pw = getpwuid(getuid());
+@@ -291,11 +310,38 @@ bool Subprocess::ForkAndExec(std::string* error) {
+     cenv.push_back(nullptr);
+ 
+     if (type_ == SubprocessType::kPty) {
++#if defined(ADB_NOMMU)
++        // openpty() creates a PTY pair without forking. The parent keeps the
++        // master side (stdinout_sfd_) and the child will open the slave side
++        // via the posix_spawn file-actions.
++        int master_fd = -1, slave_fd = -1;
++        if (openpty(&master_fd, &slave_fd, pts_name, nullptr, nullptr) != 0) {
++            *error = android::base::StringPrintf("openpty failed: %s", strerror(errno));
++            return false;
++        }
++        stdinout_sfd_.reset(master_fd);
++        child_stdinout_sfd.reset(slave_fd);
++        // Apply raw-mode to the slave side in the parent since we can't run
++        // OpenPtyChildFd() inside a vforked child.
++        if (make_pty_raw_) {
++            termios tattr;
++            if (tcgetattr(slave_fd, &tattr) == -1) {
++                *error = android::base::StringPrintf("tcgetattr failed: %s", strerror(errno));
++                return false;
++            }
++            cfmakeraw(&tattr);
++            if (tcsetattr(slave_fd, TCSADRAIN, &tattr) == -1) {
++                *error = android::base::StringPrintf("tcsetattr failed: %s", strerror(errno));
++                return false;
++            }
++        }
++#else
+         int fd;
+         pid_ = forkpty(&fd, pts_name, nullptr, nullptr);
+         if (pid_ > 0) {
+           stdinout_sfd_.reset(fd);
+         }
++#endif
+     } else {
+         if (!CreateSocketpair(&stdinout_sfd_, &child_stdinout_sfd)) {
+             *error = android::base::StringPrintf("failed to create socketpair for stdin/out: %s",
+@@ -309,9 +355,12 @@ bool Subprocess::ForkAndExec(std::string* error) {
+                                                  strerror(errno));
+             return false;
+         }
++#if !defined(ADB_NOMMU)
+         pid_ = fork();
++#endif
+     }
+ 
++#if !defined(ADB_NOMMU)
+     if (pid_ == -1) {
+         *error = android::base::StringPrintf("fork failed: %s", strerror(errno));
+         return false;
+@@ -347,18 +396,87 @@ bool Subprocess::ForkAndExec(std::string* error) {
+         child_error_sfd.reset(-1);
+         _Exit(1);
+     }
++#else
++    // ---- noMMU path: use posix_spawn ----
++    {
++        // Build the argv for /bin/sh.
++        std::vector<const char*> argv;
++        argv.push_back(_PATH_BSHELL);
++        if (command_.empty()) {
++            argv.push_back("-");
++        } else {
++            argv.push_back("-c");
++            argv.push_back(command_.c_str());
++        }
++        argv.push_back(nullptr);
++
++        posix_spawn_file_actions_t actions;
++        posix_spawnattr_t attrs;
++        posix_spawn_file_actions_init(&actions);
++        posix_spawnattr_init(&attrs);
++
++        // dup2 the child's std fds into place, then close the originals in
++        // the child.
++        posix_spawn_file_actions_adddup2(&actions, child_stdinout_sfd.get(), STDIN_FILENO);
++        posix_spawn_file_actions_adddup2(&actions, child_stdinout_sfd.get(), STDOUT_FILENO);
++        if (child_stderr_sfd != -1) {
++            posix_spawn_file_actions_adddup2(&actions, child_stderr_sfd.get(), STDERR_FILENO);
++        } else {
++            posix_spawn_file_actions_adddup2(&actions, child_stdinout_sfd.get(), STDERR_FILENO);
++        }
++        posix_spawn_file_actions_addclose(&actions, child_stdinout_sfd.get());
++        if (child_stderr_sfd != -1) {
++            posix_spawn_file_actions_addclose(&actions, child_stderr_sfd.get());
++        }
++        // Close parent-side FDs in the child so it doesn't hold them open.
++        if (stdinout_sfd_.get() >= 0) {
++            posix_spawn_file_actions_addclose(&actions, stdinout_sfd_.get());
++        }
++        if (stderr_sfd_.get() >= 0) {
++            posix_spawn_file_actions_addclose(&actions, stderr_sfd_.get());
++        }
++
++        // On noMMU we can't safely run init_subproc_child() (setsid + oom
++        // write) in the vforked child, so skip it. The daemon is typically a
++        // single-session process on uClinux and the PTY already provides its
++        // own session semantics for interactive shells.
++        (void)attrs;
++
++        int spawn_err = posix_spawn(&pid_, _PATH_BSHELL, &actions, &attrs,
++                                    const_cast<char* const*>(argv.data()),
++                                    const_cast<char* const*>(cenv.data()));
++        posix_spawn_file_actions_destroy(&actions);
++        posix_spawnattr_destroy(&attrs);
++
++        if (spawn_err != 0) {
++            *error = android::base::StringPrintf(
++                "posix_spawn '%s' failed: %s", _PATH_BSHELL, strerror(spawn_err));
++            pid_ = -1;
++            return false;
++        }
++    }
++#endif
+ 
+     // Subprocess parent.
+     D("subprocess parent: stdin/stdout FD = %d, stderr FD = %d",
+       stdinout_sfd_.get(), stderr_sfd_.get());
+ 
+-    // Wait to make sure the subprocess exec'd without error.
++#if !defined(ADB_NOMMU)
++    // Wait to make sure the subprocess exec'd without error. On noMMU the
++    // posix_spawn return value already covers exec failure.
+     child_error_sfd.reset(-1);
+     std::string error_message = ReadAll(parent_error_sfd);
+     if (!error_message.empty()) {
+         *error = error_message;
+         return false;
+     }
++#else
++    // On noMMU the child's dup targets (the slave PTY / child socketpair ends)
++    // are owned by child_stdinout_sfd / child_stderr_sfd and must be closed in
++    // the parent now that the child has its own dup'd copies.
++    child_stdinout_sfd.reset(-1);
++    child_stderr_sfd.reset(-1);
++#endif
+ 
+     D("subprocess parent: exec completed");
+     if (protocol_ == SubprocessProtocol::kNone) {
+diff --git a/adb/sysdeps.h b/adb/sysdeps.h
+index 212c1c365..162cffb3c 100644
+--- a/adb/sysdeps.h
++++ b/adb/sysdeps.h
+@@ -731,6 +731,11 @@ static __inline__ bool adb_thread_create(adb_thread_func_t start, void* arg,
+     pthread_attr_t attr;
+     pthread_attr_init(&attr);
+     pthread_attr_setdetachstate(&attr, thread ? PTHREAD_CREATE_JOINABLE : PTHREAD_CREATE_DETACHED);
++#if defined(ADB_NOMMU)
++    // On noMMU the default thread stack is 2 MB (uClibc default) which
++    // exhausts the total RAM (~2 MB).  Use a small fixed-size stack.
++    pthread_attr_setstacksize(&attr, 32768);
++#endif
+     auto* pthread_args = new adb_pthread_args{.func = start, .arg = arg};
+     errno = pthread_create(&temp, &attr, adb_pthread_wrapper, pthread_args);
+     if (errno == 0) {
+@@ -759,6 +764,10 @@ static __inline__ void __attribute__((noreturn)) adb_thread_exit() {
+ static __inline__ int adb_thread_setname(const std::string& name) {
+ #ifdef __APPLE__
+     return pthread_setname_np(name.c_str());
++#elif defined(ADB_NOMMU)
++    // uClibc-ng on noMMU/uClinux lacks pthread_setname_np; silently no-op.
++    (void)name;
++    return 0;
+ #else
+     const char *s = name.c_str();
+ 
+diff --git a/adb/usb_linux_client.cpp b/adb/usb_linux_client.cpp
+index c05300727..5588a2fc1 100644
+--- a/adb/usb_linux_client.cpp
++++ b/adb/usb_linux_client.cpp
+@@ -43,11 +43,19 @@
+ #define MAX_PACKET_SIZE_SS	1024
+ 
+ // Writes larger than 16k fail on some devices (seed with 3.10.49-g209ea2f in particular).
++#if defined(ADB_NOMMU)
++#define USB_FFS_MAX_WRITE 4096
++#else
+ #define USB_FFS_MAX_WRITE 16384
++#endif
+ 
+ // The kernel allocates a contiguous buffer for reads, which can fail for large ones due to
+ // fragmentation. 16k chosen arbitrarily to match the write limit.
++#if defined(ADB_NOMMU)
++#define USB_FFS_MAX_READ 4096
++#else
+ #define USB_FFS_MAX_READ 16384
++#endif
+ 
+ #define cpu_to_le16(x)  htole16(x)
+ #define cpu_to_le32(x)  htole32(x)
+diff --git a/include/cutils/jstring.h b/include/cutils/jstring.h
+index f4b282121..e0288841d 100644
+--- a/include/cutils/jstring.h
++++ b/include/cutils/jstring.h
+@@ -20,7 +20,7 @@
+ #include <stdint.h>
+ #include <stddef.h>
+ 
+-#if ADB_NON_ANDROID
++#if ADB_NON_ANDROID && !defined(ADB_NOMMU)
+ #include <uchar.h>
+ #endif
+ 
+@@ -30,6 +30,10 @@ extern "C" {
+ 
+ #if __STDC_VERSION__ < 201112L && __cplusplus < 201103L
+   typedef uint16_t char16_t;
++#endif
++#if defined(ADB_NOMMU) && !defined(__cplusplus)
++  /* uClibc-ng's uchar.h is broken; ensure char16_t is available in C. */
++  typedef uint16_t char16_t;
+ #endif
+   // otherwise char16_t is a keyword with the right semantics
+ 
+diff --git a/libcrypto_utils/android_pubkey.c b/libcrypto_utils/android_pubkey.c
+index cdad40c7e..b7ea6ea2e 100644
+--- a/libcrypto_utils/android_pubkey.c
++++ b/libcrypto_utils/android_pubkey.c
+@@ -14,6 +14,8 @@
+  * limitations under the License.
+  */
+ 
++#if !defined(ADB_NOMMU)
++
+ #include <crypto_utils/android_pubkey.h>
+ 
+ #include <assert.h>
+@@ -67,6 +69,7 @@ bool android_pubkey_decode(const uint8_t* key_buffer, size_t size, RSA** key) {
+   bool ret = false;
+   uint8_t modulus_buffer[ANDROID_PUBKEY_MODULUS_SIZE];
+   RSA* new_key = RSA_new();
++  BIGNUM *n = NULL, *e = NULL;
+   if (!new_key) {
+     goto cleanup;
+   }
+@@ -82,16 +85,22 @@ bool android_pubkey_decode(const uint8_t* key_buffer, size_t size, RSA** key) {
+   // Convert the modulus to big-endian byte order as expected by BN_bin2bn.
+   memcpy(modulus_buffer, key_struct->modulus, sizeof(modulus_buffer));
+   reverse_bytes(modulus_buffer, sizeof(modulus_buffer));
+-  new_key->n = BN_bin2bn(modulus_buffer, sizeof(modulus_buffer), NULL);
+-  if (!new_key->n) {
++  n = BN_bin2bn(modulus_buffer, sizeof(modulus_buffer), NULL);
++  if (!n) {
+     goto cleanup;
+   }
+ 
+   // Read the exponent.
+-  new_key->e = BN_new();
+-  if (!new_key->e || !BN_set_word(new_key->e, key_struct->exponent)) {
++  e = BN_new();
++  if (!e || !BN_set_word(e, key_struct->exponent)) {
++    goto cleanup;
++  }
++
++  if (!RSA_set0_key(new_key, n, e, NULL)) {
+     goto cleanup;
+   }
++  n = NULL;
++  e = NULL;
+ 
+   // Note that we don't extract the montgomery parameters n0inv and rr from
+   // the RSAPublicKey structure. They assume a word size of 32 bits, but
+@@ -102,84 +111,28 @@ bool android_pubkey_decode(const uint8_t* key_buffer, size_t size, RSA** key) {
+   // pre-computed montgomery parameters.
+ 
+   *key = new_key;
++  new_key = NULL;
+   ret = true;
+ 
+ cleanup:
+-  if (!ret && new_key) {
++  BN_free(e);
++  BN_free(n);
++  if (new_key) {
+     RSA_free(new_key);
+   }
+   return ret;
+ }
+ 
+ #ifdef ADB_NON_ANDROID
+-/* From https://android.googlesource.com/platform/external/chromium_org/third_party/boringssl/src/+/6887edb^!/ */
+-
+-/* constant_time_select_ulong returns |x| if |v| is 1 and |y| if |v| is 0. Its
+- * behavior is undefined if |v| takes any other value. */
+-static BN_ULONG constant_time_select_ulong(int v, BN_ULONG x, BN_ULONG y) {
+-  BN_ULONG mask = v;
+-  mask--;
+-
+-  return (~mask & x) | (mask & y);
+-}
+-
+-/* constant_time_le_size_t returns 1 if |x| <= |y| and 0 otherwise. |x| and |y|
+- * must not have their MSBs set. */
+-static int constant_time_le_size_t(size_t x, size_t y) {
+-  return ((x - y - 1) >> (sizeof(size_t) * 8 - 1)) & 1;
+-}
+-
+-/* read_word_padded returns the |i|'th word of |in|, if it is not out of
+- * bounds. Otherwise, it returns 0. It does so without branches on the size of
+- * |in|, however it necessarily does not have the same memory access pattern. If
+- * the access would be out of bounds, it reads the last word of |in|. |in| must
+- * not be zero. */
+-static BN_ULONG read_word_padded(const BIGNUM *in, size_t i) {
+-  /* Read |in->d[i]| if valid. Otherwise, read the last word. */
+-  BN_ULONG l = in->d[constant_time_select_ulong(
+-      constant_time_le_size_t(in->dmax, i), in->dmax - 1, i)];
+-
+-  /* Clamp to zero if above |d->top|. */
+-  return constant_time_select_ulong(constant_time_le_size_t(in->top, i), 0, l);
+-}
+-
++/*
++ * OpenSSL 3.x provides BN_bn2binpad() natively (equivalent to BoringSSL's
++ * BN_bn2bin_padded).  The old BoringSSL-derived implementation accessed
++ * BIGNUM internal fields (->d, ->dmax, ->top) which are opaque in OpenSSL 3.
++ * Use the native function instead.
++ */
+ int BN_bn2bin_padded(uint8_t *out, size_t len, const BIGNUM *in) {
+-  size_t i;
+-  BN_ULONG l;
+-
+-  /* Special case for |in| = 0. Just branch as the probability is negligible. */
+-  if (BN_is_zero(in)) {
+-    memset(out, 0, len);
+-    return 1;
+-  }
+-
+-  /* Check if the integer is too big. This case can exit early in non-constant
+-   * time. */
+-  if (in->top > (len + (BN_BYTES - 1)) / BN_BYTES) {
+-    return 0;
+-  }
+-  if ((len % BN_BYTES) != 0) {
+-    l = read_word_padded(in, len / BN_BYTES);
+-    if (l >> (8 * (len % BN_BYTES)) != 0) {
+-      return 0;
+-    }
+-  }
+-
+-  /* Write the bytes out one by one. Serialization is done without branching on
+-   * the bits of |in| or on |in->top|, but if the routine would otherwise read
+-   * out of bounds, the memory access pattern can't be fixed. However, for an
+-   * RSA key of size a multiple of the word size, the probability of BN_BYTES
+-   * leading zero octets is low.
+-   *
+-   * See Falko Stenzke, "Manger's Attack revisited", ICICS 2010. */
+-  i = len;
+-  while (i--) {
+-    l = read_word_padded(in, i / BN_BYTES);
+-    *(out++) = (uint8_t)(l >> (8 * (i % BN_BYTES))) & 0xff;
+-  }
+-  return 1;
++  return BN_bn2binpad(in, out, len);
+ }
+-
+ #endif
+ 
+ static bool android_pubkey_encode_bignum(const BIGNUM* num, uint8_t* buffer) {
+@@ -198,6 +151,9 @@ bool android_pubkey_encode(const RSA* key, uint8_t* key_buffer, size_t size) {
+   BIGNUM* r32 = BN_new();
+   BIGNUM* n0inv = BN_new();
+   BIGNUM* rr = BN_new();
++  const BIGNUM *n = NULL, *e = NULL;
++
++  RSA_get0_key(key, &n, &e, NULL);
+ 
+   if (sizeof(RSAPublicKey) > size ||
+       RSA_size(key) != ANDROID_PUBKEY_MODULUS_SIZE) {
+@@ -209,26 +165,26 @@ bool android_pubkey_encode(const RSA* key, uint8_t* key_buffer, size_t size) {
+ 
+   // Compute and store n0inv = -1 / N[0] mod 2^32.
+   if (!ctx || !r32 || !n0inv || !BN_set_bit(r32, 32) ||
+-      !BN_mod(n0inv, key->n, r32, ctx) ||
++      !BN_mod(n0inv, n, r32, ctx) ||
+       !BN_mod_inverse(n0inv, n0inv, r32, ctx) || !BN_sub(n0inv, r32, n0inv)) {
+     goto cleanup;
+   }
+   key_struct->n0inv = (uint32_t)BN_get_word(n0inv);
+ 
+   // Store the modulus.
+-  if (!android_pubkey_encode_bignum(key->n, key_struct->modulus)) {
++  if (!android_pubkey_encode_bignum(n, key_struct->modulus)) {
+     goto cleanup;
+   }
+ 
+   // Compute and store rr = (2^(rsa_size)) ^ 2 mod N.
+   if (!ctx || !rr || !BN_set_bit(rr, ANDROID_PUBKEY_MODULUS_SIZE * 8) ||
+-      !BN_mod_sqr(rr, rr, key->n, ctx) ||
++      !BN_mod_sqr(rr, rr, n, ctx) ||
+       !android_pubkey_encode_bignum(rr, key_struct->rr)) {
+     goto cleanup;
+   }
+ 
+   // Store the exponent.
+-  key_struct->exponent = (uint32_t)BN_get_word(key->e);
++  key_struct->exponent = (uint32_t)BN_get_word(e);
+ 
+   ret = true;
+ 
+@@ -239,3 +195,5 @@ cleanup:
+   BN_CTX_free(ctx);
+   return ret;
+ }
++
++#endif /* !defined(ADB_NOMMU) */
+-- 
+2.54.0
+

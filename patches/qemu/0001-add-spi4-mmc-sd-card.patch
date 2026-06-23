@@ -1,0 +1,53 @@
+From: stm32f429-adbd
+Date: Fri, 19 Jun 2026 13:46:30 +0800
+Subject: add-spi4-mmc-sd-card
+
+---
+ hw/arm/stm32f429-discovery.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/hw/arm/stm32f429-discovery.c b/hw/arm/stm32f429-discovery.c
+index 8641540..adf49fb 100644
+--- a/hw/arm/stm32f429-discovery.c
++++ b/hw/arm/stm32f429-discovery.c
+@@ -9,7 +9,10 @@
+ #include "hw/arm/boot.h"
+ #include "hw/arm/machines-qom.h"
+ #include "hw/misc/unimp.h"
++#include "hw/ssi/ssi.h"
++#include "hw/sd/sd.h"
+ #include "system/address-spaces.h"
++#include "system/blockdev.h"
+ #include "system/system.h"
+ 
+ #define SYSCLK_FREQ 180000000
+@@ -31,6 +34,26 @@ static void stm32f429discovery_init(MachineState *machine)
+     qdev_connect_clock_in(dev, "sysclk", sysclk);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+ 
++    /*
++     * Attach an SD card to SPI4 (index 3) via the ssi-sd adapter.
++     * The real board uses a TF card on SPI4 with mmc-spi-slot DT binding
++     * (cs-gpios = <&gpioe 4 GPIO_ACTIVE_LOW>).  QEMU's STM32F2xx SPI model
++     * does not expose a CS output line, so we leave the ssi-sd CS GPIO
++     * unconnected — the SSIPeripheral.cs field defaults to false which is
++     * active for SSI_CS_LOW, keeping the single slave permanently selected.
++     */
++    STM32F405State *soc = STM32F405_SOC(dev);
++    SSIBus *spi4_bus = (SSIBus *)qdev_get_child_bus(DEVICE(&soc->spi[3]), "ssi");
++    DeviceState *sd_dev = ssi_create_peripheral(spi4_bus, "ssi-sd");
++
++    DriveInfo *dinfo = drive_get(IF_SD, 0, 0);
++    BlockBackend *blk = dinfo ? blk_by_legacy_dinfo(dinfo) : NULL;
++    DeviceState *card = qdev_new(TYPE_SD_CARD_SPI);
++    qdev_prop_set_drive_err(card, "drive", blk, &error_fatal);
++    qdev_realize_and_unref(card,
++                           qdev_get_child_bus(sd_dev, "sd-bus"),
++                           &error_fatal);
++
+     MemoryRegion *mem = g_new(MemoryRegion, 1);
+     memory_region_init_rom(mem, NULL, "stm32f429.flash_bank2",
+                            EXTRA_FLASH_SIZE, &error_fatal);
+-- 
+2.54.0
+

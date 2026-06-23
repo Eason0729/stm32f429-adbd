@@ -1,0 +1,172 @@
+From 3f7cfa6c9421c68743dd755542ff53506f0ebadd Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E9=82=B1=E7=B9=BC=E5=8F=A1=20Eason=20CHIU?=
+ <30045503+Eason0729@users.noreply.github.com>
+Date: Sat, 20 Jun 2026 21:51:12 +0800
+Subject: [PATCH 3/8] feature gated service and jdwp
+
+---
+ adb/framebuffer_service.cpp             | 30 ++++---------------------
+ adb/remount_service.cpp                 |  6 ++++-
+ adb/services.cpp                        | 20 ++++++++++++++++-
+ adb/set_verity_enable_state_service.cpp |  6 ++++-
+ 4 files changed, 33 insertions(+), 29 deletions(-)
+
+diff --git a/adb/framebuffer_service.cpp b/adb/framebuffer_service.cpp
+index dde4c157a..dc02240f5 100644
+--- a/adb/framebuffer_service.cpp
++++ b/adb/framebuffer_service.cpp
+@@ -14,10 +14,11 @@
+  * limitations under the License.
+  */
+ 
++#ifndef ADB_NOMMU
++
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <linux/fb.h>
+-#include <spawn.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -67,30 +68,6 @@ void framebuffer_service(int fd, void *cookie)
+ 
+     if (pipe2(fds, O_CLOEXEC) < 0) goto pipefail;
+ 
+-#if defined(ADB_NOMMU)
+-    {
+-        // On noMMU we cannot fork(); use posix_spawn with file-actions to
+-        // wire screencap's stdout to fds[1] and close both pipe ends in the
+-        // child.
+-        posix_spawn_file_actions_t actions;
+-        posix_spawnattr_t attrs;
+-        if (posix_spawn_file_actions_init(&actions) != 0) goto done;
+-        posix_spawnattr_init(&attrs);
+-        posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+-        posix_spawn_file_actions_addclose(&actions, fds[0]);
+-        posix_spawn_file_actions_addclose(&actions, fds[1]);
+-        const char* command = "screencap";
+-        char* const argv[] = {const_cast<char*>(command), nullptr};
+-        extern char** environ;
+-        int spawn_err = posix_spawn(&pid, command, &actions, &attrs, argv, environ);
+-        posix_spawn_file_actions_destroy(&actions);
+-        posix_spawnattr_destroy(&attrs);
+-        if (spawn_err != 0) {
+-            pid = -1;
+-            goto done;
+-        }
+-    }
+-#else
+     pid = fork();
+     if (pid < 0) goto done;
+ 
+@@ -103,7 +80,6 @@ void framebuffer_service(int fd, void *cookie)
+         execvp(command, (char**)args);
+         exit(1);
+     }
+-#endif
+ 
+     adb_close(fds[1]);
+     fd_screencap = fds[0];
+@@ -209,3 +185,5 @@ done:
+ pipefail:
+     adb_close(fd);
+ }
++
++#endif /* !ADB_NOMMU */
+diff --git a/adb/remount_service.cpp b/adb/remount_service.cpp
+index 44e3028db..9b570a159 100644
+--- a/adb/remount_service.cpp
++++ b/adb/remount_service.cpp
+@@ -16,6 +16,8 @@
+ 
+ #define TRACE_TAG ADB
+ 
++#ifndef ADB_NOMMU
++
+ #include "sysdeps.h"
+ 
+ #include <errno.h>
+@@ -163,4 +165,6 @@ void remount_service(int fd, void* cookie)
+     WriteFdExactly(fd, "remount failed, not implemented\n");
+     adb_close(fd);
+ }
+-#endif
++#endif /* !ADB_NON_ANDROID */
++
++#endif /* !ADB_NOMMU */
+diff --git a/adb/services.cpp b/adb/services.cpp
+index 8496dcddd..d24d3156e 100644
+--- a/adb/services.cpp
++++ b/adb/services.cpp
+@@ -318,10 +318,16 @@ int service_to_fd(const char* name, const atransport* transport) {
+     } else if(!strncmp("dev:", name, 4)) {
+         ret = unix_open(name + 4, O_RDWR | O_CLOEXEC);
+     } else if(!strncmp(name, "framebuffer:", 12)) {
++#if !defined(ADB_NOMMU)
+         ret = create_service_thread(framebuffer_service, 0);
+-#ifndef ADB_NON_ANDROID
++#else
++        ret = -1;
++#endif
+     } else if (!strncmp(name, "jdwp:", 5)) {
++#if !defined(ADB_NON_ANDROID)
+         ret = create_jdwp_connection_fd(atoi(name+5));
++#else
++        ret = -1;
+ #endif
+     } else if(!strncmp(name, "shell", 5)) {
+         ret = ShellService(name + 5, transport);
+@@ -330,7 +336,11 @@ int service_to_fd(const char* name, const atransport* transport) {
+     } else if(!strncmp(name, "sync:", 5)) {
+         ret = create_service_thread(file_sync_service, NULL);
+     } else if(!strncmp(name, "remount:", 8)) {
++#if !defined(ADB_NOMMU)
+         ret = create_service_thread(remount_service, NULL);
++#else
++        ret = -1;
++#endif
+     } else if(!strncmp(name, "reboot:", 7)) {
+         void* arg = strdup(name + 7);
+         if (arg == NULL) return -1;
+@@ -357,9 +367,17 @@ int service_to_fd(const char* name, const atransport* transport) {
+     } else if (!strncmp(name, "reverse:", 8)) {
+         ret = reverse_service(name + 8);
+     } else if(!strncmp(name, "disable-verity:", 15)) {
++#if !defined(ADB_NOMMU)
+         ret = create_service_thread(set_verity_enabled_state_service, (void*)0);
++#else
++        ret = -1;
++#endif
+     } else if(!strncmp(name, "enable-verity:", 15)) {
++#if !defined(ADB_NOMMU)
+         ret = create_service_thread(set_verity_enabled_state_service, (void*)1);
++#else
++        ret = -1;
++#endif
+     } else if (!strcmp(name, "reconnect")) {
+         ret = create_service_thread(reconnect_service, const_cast<atransport*>(transport));
+ #endif
+diff --git a/adb/set_verity_enable_state_service.cpp b/adb/set_verity_enable_state_service.cpp
+index 29b997900..f00085b44 100644
+--- a/adb/set_verity_enable_state_service.cpp
++++ b/adb/set_verity_enable_state_service.cpp
+@@ -16,6 +16,8 @@
+ 
+ #define TRACE_TAG ADB
+ 
++#ifndef ADB_NOMMU
++
+ #include "sysdeps.h"
+ 
+ #include <fcntl.h>
+@@ -148,4 +150,6 @@ void set_verity_enabled_state_service(int fd, void* cookie)
+ {
+     adb_close(fd);
+ }
+-#endif
++#endif /* !ADB_NON_ANDROID */
++
++#endif /* !ADB_NOMMU */
+-- 
+2.54.0
+

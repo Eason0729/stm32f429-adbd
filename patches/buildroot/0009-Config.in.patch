@@ -1,0 +1,21 @@
+From: stm32f429-adbd
+Date: Wed, 17 Jun 2026 00:00:00 +0800
+Subject: Add Config.in
+
+---
+--- a/package/adbd/Config.in	2026-06-17 20:18:51.501324435 +0800
++++ b/package/adbd/Config.in	2026-06-17 17:09:24.975882940 +0800
+@@ -0,0 +1,11 @@
++config BR2_PACKAGE_ADBD
++	bool "adbd (Android Debug Bridge daemon)"
++	depends on BR2_INSTALL_LIBSTDCPP
++	select BR2_PACKAGE_OPENSSL
++	help
++	  Android Debug Bridge daemon, ported for embedded Linux via
++	  the arduino/adbd fork. Provides adb-over-USB using the Linux
++	  USB gadget FunctionFS interface so a host running `adb` can
++	  shell into the board.
++
++	  https://github.com/arduino/adbd
+\ No newline at end of file
+

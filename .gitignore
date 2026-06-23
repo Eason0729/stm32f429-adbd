@@ -1,0 +1,6 @@
+/output/
+/output_backup/
+/init/init
+/*.log
+/linux-7.0
+**.gdb

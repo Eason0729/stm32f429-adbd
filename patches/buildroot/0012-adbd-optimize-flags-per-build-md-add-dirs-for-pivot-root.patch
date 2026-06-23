@@ -1,0 +1,28 @@
+From: stm32f429-adbd
+Date: Sun, 21 Jun 2026 00:40:38 +0800
+Subject: adbd: optimize flags per BUILD.md, add dirs for pivot_root
+
+---
+ .../stmicroelectronics/common/stm32f4xx/stm32-post-build.sh | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh b/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
+index 319f3bf..c2e0930 100755
+--- a/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
++++ b/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
+@@ -1,6 +1,12 @@
+ #!/bin/sh
+ set -eu
+ 
++# Create mount points needed by init after pivot_root
++mkdir -p "${TARGET_DIR}/dev/pts"
++mkdir -p "${TARGET_DIR}/sys/kernel/config"
++mkdir -p "${TARGET_DIR}/oldroot"
++mkdir -p "${TARGET_DIR}/var"
++
+ # Busybox is built without network support
+ if [ -f "${TARGET_DIR}/etc/inittab" ]; then
+     sed -i '/hostname/d' ${TARGET_DIR}/etc/inittab
+-- 
+2.54.0
+

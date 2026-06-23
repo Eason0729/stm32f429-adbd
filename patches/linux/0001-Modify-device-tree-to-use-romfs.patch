@@ -1,0 +1,76 @@
+From 03cfa0700fc5015bf473a60db0ce9f99b7dbd8cf Mon Sep 17 00:00:00 2001
+From: Chisheng Chen <johnny1001s000602@gmail.com>
+Date: Mon, 27 Apr 2026 22:43:41 +0800
+Subject: [PATCH 1/9] Modify device tree to use romfs
+
+---
+ arch/arm/boot/dts/st/stm32f429-disco.dts | 33 +++++++++++++++++++++++-
+ 1 file changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/boot/dts/st/stm32f429-disco.dts b/arch/arm/boot/dts/st/stm32f429-disco.dts
+index ded369abe..bcc99716b 100644
+--- a/arch/arm/boot/dts/st/stm32f429-disco.dts
++++ b/arch/arm/boot/dts/st/stm32f429-disco.dts
+@@ -58,7 +58,7 @@ / {
+ 	compatible = "st,stm32f429i-disco", "st,stm32f429";
+ 
+ 	chosen {
+-		bootargs = "root=/dev/ram";
++		bootargs = "root=mtd:romfs rootfstype=romfs ro";
+ 		stdout-path = "serial0:115200n8";
+ 	};
+ 
+@@ -67,6 +67,18 @@ memory@90000000 {
+ 		reg = <0x90000000 0x800000>;
+ 	};
+ 
++	flash@8000000 {
++		compatible = "mtd-rom";
++		reg = <0x8000000 0x200000>;
++		bank-width = <4>;
++		#address-cells = <1>;
++
++		partition@150000 {
++			label = "romfs";
++			reg = <0x150000 0xb0000>;
++		};
++	};
++
+ 	aliases {
+ 		serial0 = &usart1;
+ 	};
+@@ -109,12 +121,31 @@ vcc5v_otg: vcc5v-otg-regulator {
+ 		regulator-name = "vcc5_host1";
+ 		regulator-always-on;
+ 	};
++
++	v3v3: regulator-v3v3 {
++		compatible = "regulator-fixed";
++		regulator-name = "v3v3";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++		regulator-always-on;  
++	};
+ };
+ 
+ &clk_hse {
+ 	clock-frequency = <8000000>;
+ };
+ 
++&sdio {
++	status = "okay";
++	pinctrl-names = "default", "opendrain";
++	pinctrl-0 = <&sdio_pins>;
++	pinctrl-1 = <&sdio_pins_od>;
++	bus-width = <1>;
++	max-frequency = <1000000>;
++	broken-cd;
++	vmmc-supply = <&v3v3>;
++};
++
+ &crc {
+ 	status = "okay";
+ };
+-- 
+2.43.0
+

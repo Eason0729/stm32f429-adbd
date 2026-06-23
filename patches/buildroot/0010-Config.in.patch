@@ -1,0 +1,19 @@
+From: stm32f429-adbd
+Date: Wed, 17 Jun 2026 00:00:00 +0800
+Subject: Modify Config.in
+
+---
+--- a/package/Config.in	2026-03-04 16:11:17.000000000 +0800
++++ b/package/Config.in	2026-06-17 17:17:29.036624524 +0800
+@@ -301,6 +301,10 @@
+ 	source "package/xorcurses/Config.in"
+ endmenu
+ 
++menu "ADB"
++	source "package/adbd/Config.in"
++endmenu
++
+ menu "Graphic libraries and applications (graphic/text)"
+ 
+ comment "Graphic applications"
+

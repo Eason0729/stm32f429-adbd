@@ -1,0 +1,33 @@
+From 7eebdc7137e5de57d1ba800467cb01ac015c1117 Mon Sep 17 00:00:00 2001
+From: Chisheng Chen <johnny1001s000602@gmail.com>
+Date: Mon, 20 Apr 2026 05:40:12 +0800
+Subject: [PATCH 4/4] Fix error in STM32 post build
+
+---
+ .../common/stm32f4xx/stm32-post-build.sh                  | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh b/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
+index daaa7e75..c9b43947 100755
+--- a/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
++++ b/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
+@@ -2,10 +2,14 @@
+ set -eu
+ 
+ # Busybox is built without network support
+-sed -i '/hostname/d' ${TARGET_DIR}/etc/inittab
++if [ -f "${TARGET_DIR}/etc/inittab" ]; then
++    sed -i '/hostname/d' ${TARGET_DIR}/etc/inittab
++fi
+ 
+ # Kernel is built without devpts support
+-sed -i '/^devpts/d' ${TARGET_DIR}/etc/fstab
++if [ -f "${TARGET_DIR}/etc/fstab" ]; then
++    sed -i '/^devpts/d' ${TARGET_DIR}/etc/fstab
++fi
+ 
+ if [ -d "${TARGET_DIR}/lib" ]; then
+     rm -f "${TARGET_DIR}/lib/libgcc_s.so"*
+-- 
+2.43.0
+

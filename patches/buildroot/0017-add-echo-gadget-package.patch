@@ -1,0 +1,490 @@
+From: stm32f429-adbd
+Date: Tue, 23 Jun 2026 14:30:34 +0800
+Subject: add-echo-gadget-package
+
+---
+ package/Config.in                  |   4 +
+ package/echo_gadget/Config.in      |   7 +
+ package/echo_gadget/echo_gadget.c  | 413 +++++++++++++++++++++++++++++
+ package/echo_gadget/echo_gadget.mk |  20 ++
+ 4 files changed, 444 insertions(+)
+ create mode 100644 package/echo_gadget/Config.in
+ create mode 100644 package/echo_gadget/echo_gadget.c
+ create mode 100644 package/echo_gadget/echo_gadget.mk
+
+diff --git a/package/Config.in b/package/Config.in
+index 844b62a..5b92366 100644
+--- a/package/Config.in
++++ b/package/Config.in
+@@ -305,6 +305,10 @@ menu "ADB"
+ 	source "package/adbd/Config.in"
+ endmenu
+ 
++menu "USB gadgets"
++	source "package/echo_gadget/Config.in"
++endmenu
++
+ menu "Graphic libraries and applications (graphic/text)"
+ 
+ comment "Graphic applications"
+diff --git a/package/echo_gadget/Config.in b/package/echo_gadget/Config.in
+new file mode 100644
+index 0000000..1731920
+--- /dev/null
++++ b/package/echo_gadget/Config.in
+@@ -0,0 +1,7 @@
++config BR2_PACKAGE_ECHO_GADGET
++	bool "echo_gadget"
++	help
++	  USB FunctionFS echo gadget daemon. Provides a vendor-specific
++	  USB gadget using FunctionFS that echoes back data received
++	  from the host. Useful for testing USB gadget functionality
++	  on noMMU Linux systems.
+diff --git a/package/echo_gadget/echo_gadget.c b/package/echo_gadget/echo_gadget.c
+new file mode 100644
+index 0000000..1160e0f
+--- /dev/null
++++ b/package/echo_gadget/echo_gadget.c
+@@ -0,0 +1,413 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <poll.h>
++#include <stdint.h>
++#include <endian.h>
++#include <sys/mount.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++
++#include <linux/usb/ch9.h>
++#include <linux/usb/functionfs.h>
++
++#define VENDOR_ID   0x1d6b
++#define PRODUCT_ID  0x0104
++#define MANUFACTURER "Linux-On-STM32"
++#define PRODUCT      "Echo-Gadget"
++#define SERIAL       "0001"
++
++#define EP0_FILE    "/dev/usb-ffs/echo/ep0"
++#define EP1_OUT     "/dev/usb-ffs/echo/ep1"
++#define EP1_IN      "/dev/usb-ffs/echo/ep2"
++#define FFS_MOUNT   "/dev/usb-ffs/echo"
++#define CONFIGFS    "/config"
++
++#define BUF_SIZE    4096
++
++struct ffs_v2_header {
++	__le32 magic;
++	__le32 length;
++	__le32 flags;
++	__le32 fs_count;
++} __attribute__((packed));
++
++struct ffs_strings_header {
++	__le32 magic;
++	__le32 length;
++	__le32 str_count;
++	__le32 lang_count;
++} __attribute__((packed));
++
++static int mkdir_p(const char *path, mode_t mode)
++{
++	char tmp[256];
++	char *p;
++	size_t len;
++
++	snprintf(tmp, sizeof(tmp), "%s", path);
++	len = strlen(tmp);
++	if (len == 0)
++		return 0;
++
++	if (tmp[len - 1] == '/')
++		tmp[len - 1] = '\0';
++
++	for (p = tmp + 1; *p; p++) {
++		if (*p == '/') {
++			*p = '\0';
++			if (mkdir(tmp, mode) && errno != EEXIST)
++				return -1;
++			*p = '/';
++		}
++	}
++	if (mkdir(tmp, mode) && errno != EEXIST)
++		return -1;
++	return 0;
++}
++
++static int configure_gadget(void)
++{
++	char path[256];
++	int fd;
++
++	if (mkdir(CONFIGFS, 0755) && errno != EEXIST) {
++		perror("mkdir /config");
++		return -1;
++	}
++	if (mount("none", CONFIGFS, "configfs", 0, NULL)) {
++		if (errno != EBUSY) {
++			perror("mount configfs");
++			return -1;
++		}
++		printf("configfs already mounted\n");
++	}
++
++	mkdir(CONFIGFS "/usb_gadget", 0755);
++	mkdir(CONFIGFS "/usb_gadget/g1", 0755);
++
++	fd = open(CONFIGFS "/usb_gadget/g1/idVendor", O_WRONLY);
++	if (fd < 0) { perror("idVendor"); return -1; }
++	dprintf(fd, "0x%04x", VENDOR_ID);
++	close(fd);
++
++	fd = open(CONFIGFS "/usb_gadget/g1/idProduct", O_WRONLY);
++	if (fd < 0) { perror("idProduct"); return -1; }
++	dprintf(fd, "0x%04x", PRODUCT_ID);
++	close(fd);
++
++	fd = open(CONFIGFS "/usb_gadget/g1/bcdDevice", O_WRONLY);
++	if (fd < 0) { perror("bcdDevice"); return -1; }
++	dprintf(fd, "0x%04x", 0x0100);
++	close(fd);
++
++	fd = open(CONFIGFS "/usb_gadget/g1/bcdUSB", O_WRONLY);
++	if (fd < 0) { perror("bcdUSB"); return -1; }
++	dprintf(fd, "0x%04x", 0x0200);
++	close(fd);
++
++	snprintf(path, sizeof(path), CONFIGFS "/usb_gadget/g1/strings/0x409");
++	mkdir(path, 0755);
++
++	fd = open(CONFIGFS "/usb_gadget/g1/strings/0x409/manufacturer", O_WRONLY);
++	if (fd < 0) { perror("manufacturer"); return -1; }
++	write(fd, MANUFACTURER, strlen(MANUFACTURER));
++	close(fd);
++
++	fd = open(CONFIGFS "/usb_gadget/g1/strings/0x409/product", O_WRONLY);
++	if (fd < 0) { perror("product"); return -1; }
++	write(fd, PRODUCT, strlen(PRODUCT));
++	close(fd);
++
++	fd = open(CONFIGFS "/usb_gadget/g1/strings/0x409/serialnumber", O_WRONLY);
++	if (fd < 0) { perror("serialnumber"); return -1; }
++	write(fd, SERIAL, strlen(SERIAL));
++	close(fd);
++
++	mkdir(CONFIGFS "/usb_gadget/g1/functions/ffs.echo", 0755);
++	mkdir(CONFIGFS "/usb_gadget/g1/configs/c.1", 0755);
++
++	fd = open(CONFIGFS "/usb_gadget/g1/configs/c.1/MaxPower", O_WRONLY);
++	if (fd < 0) { perror("MaxPower"); return -1; }
++	write(fd, "250", 3);
++	close(fd);
++
++	return 0;
++}
++
++static int bind_udc(void)
++{
++	int fd;
++
++	fd = open(CONFIGFS "/usb_gadget/g1/UDC", O_WRONLY);
++	if (fd < 0) {
++		perror("open UDC");
++		return -1;
++	}
++	if (write(fd, "40040000.usb", 12) < 0) {
++		perror("write UDC");
++		close(fd);
++		return -1;
++	}
++	close(fd);
++	return 0;
++}
++
++static int write_descriptors(int fd)
++{
++	uint8_t buf[BUF_SIZE];
++	__le32 *p;
++	int total_len, off = 0;
++
++	struct usb_interface_descriptor iface = {
++		.bLength = sizeof(iface),
++		.bDescriptorType = USB_DT_INTERFACE,
++		.bInterfaceNumber = 0,
++		.bAlternateSetting = 0,
++		.bNumEndpoints = 2,
++		.bInterfaceClass = 0xFF,
++		.bInterfaceSubClass = 0,
++		.bInterfaceProtocol = 0,
++		.iInterface = 0,
++	};
++
++	struct usb_endpoint_descriptor_no_audio ep_out = {
++		.bLength = sizeof(ep_out),
++		.bDescriptorType = USB_DT_ENDPOINT,
++		.bEndpointAddress = USB_DIR_OUT | 1,
++		.bmAttributes = USB_ENDPOINT_XFER_BULK,
++		.wMaxPacketSize = 64,
++		.bInterval = 0,
++	};
++
++	struct usb_endpoint_descriptor_no_audio ep_in = {
++		.bLength = sizeof(ep_in),
++		.bDescriptorType = USB_DT_ENDPOINT,
++		.bEndpointAddress = USB_DIR_IN | 2,
++		.bmAttributes = USB_ENDPOINT_XFER_BULK,
++		.wMaxPacketSize = 64,
++		.bInterval = 0,
++	};
++
++	total_len = sizeof(struct ffs_v2_header)
++		+ sizeof(iface) + sizeof(ep_out) + sizeof(ep_in);
++
++	memset(buf, 0, total_len);
++
++	p = (__le32 *)buf;
++	*p++ = htole32(FUNCTIONFS_DESCRIPTORS_MAGIC_V2);
++	*p++ = htole32(total_len);
++	*p++ = htole32(FUNCTIONFS_HAS_FS_DESC);
++	*p++ = htole32(3);
++	off = sizeof(struct ffs_v2_header);
++
++	memcpy(buf + off, &iface, sizeof(iface));
++	off += sizeof(iface);
++
++	memcpy(buf + off, &ep_out, sizeof(ep_out));
++	off += sizeof(ep_out);
++
++	memcpy(buf + off, &ep_in, sizeof(ep_in));
++	off += sizeof(ep_in);
++
++	if (write(fd, buf, total_len) != total_len) {
++		perror("write descriptors");
++		return -1;
++	}
++	printf("Wrote %d bytes of descriptors\n", total_len);
++	return 0;
++}
++
++static int write_strings(int fd)
++{
++	uint8_t buf[BUF_SIZE];
++	__le32 *p;
++	int off = 0, total_len;
++	const char *strs[] = { MANUFACTURER, PRODUCT, SERIAL };
++	int nstrs = 3;
++	int i, slen, strsize;
++
++	strsize = 0;
++	for (i = 0; i < nstrs; i++)
++		strsize += strlen(strs[i]) + 1;
++
++	total_len = sizeof(struct ffs_strings_header) + 2 + strsize;
++
++	p = (__le32 *)buf;
++	*p++ = htole32(FUNCTIONFS_STRINGS_MAGIC);
++	*p++ = htole32(total_len);
++	*p++ = htole32(nstrs);
++	*p++ = htole32(1);
++	off = sizeof(struct ffs_strings_header);
++
++	*(__le16 *)(buf + off) = htole16(0x0409);
++	off += 2;
++
++	for (i = 0; i < nstrs; i++) {
++		slen = strlen(strs[i]) + 1;
++		memcpy(buf + off, strs[i], slen);
++		off += slen;
++	}
++
++	if (write(fd, buf, total_len) != total_len) {
++		perror("write strings");
++		return -1;
++	}
++	printf("Wrote %d bytes of strings\n", total_len);
++	return 0;
++}
++
++static int start_ffs(void)
++{
++	int fd;
++
++	if (symlink(CONFIGFS "/usb_gadget/g1/functions/ffs.echo",
++		    CONFIGFS "/usb_gadget/g1/configs/c.1/ffs.echo")) {
++		if (errno != EEXIST) {
++			perror("symlink ffs function");
++			return -1;
++		}
++		printf("symlink already exists\n");
++	}
++
++	mkdir_p(FFS_MOUNT, 0755);
++	if (mount("echo", FFS_MOUNT, "functionfs", 0, NULL)) {
++		if (errno != EBUSY) {
++			perror("mount functionfs");
++			return -1;
++		}
++		printf("functionfs already mounted\n");
++	}
++
++	fd = open(EP0_FILE, O_RDWR);
++	if (fd < 0) {
++		perror("open ep0");
++		return -1;
++	}
++
++	if (write_descriptors(fd))
++		goto err;
++	if (write_strings(fd))
++		goto err;
++
++	bind_udc();
++	return fd;
++
++err:
++	close(fd);
++	return -1;
++}
++
++int main(void)
++{
++	int ep0_fd, ep_out_fd, ep_in_fd;
++	struct pollfd pfds[3];
++	ssize_t n;
++	uint8_t buf[BUF_SIZE];
++
++	printf("Echo Gadget Daemon starting...\n");
++
++	if (configure_gadget()) {
++		fprintf(stderr, "Failed to configure gadget\n");
++		return 1;
++	}
++
++	ep0_fd = start_ffs();
++	if (ep0_fd < 0) {
++		fprintf(stderr, "Failed to start FFS\n");
++		return 1;
++	}
++	printf("FunctionFS started, waiting for host connection...\n");
++
++	ep_out_fd = -1;
++	ep_in_fd = -1;
++
++	while (1) {
++		memset(pfds, 0, sizeof(pfds));
++		pfds[0].fd = ep0_fd;
++		pfds[0].events = POLLIN;
++
++		if (ep_out_fd >= 0) {
++			pfds[1].fd = ep_out_fd;
++			pfds[1].events = POLLIN;
++		}
++		if (ep_in_fd >= 0) {
++			pfds[2].fd = ep_in_fd;
++			pfds[2].events = 0;
++		}
++
++		if (poll(pfds, 3, -1) < 0) {
++			if (errno == EINTR)
++				continue;
++			perror("poll");
++			break;
++		}
++
++		if (pfds[0].revents & POLLIN) {
++			struct usb_functionfs_event event;
++			n = read(ep0_fd, &event, sizeof(event));
++			if (n == sizeof(event)) {
++				printf("FFS event: type=%d\n", event.type);
++				if (event.type == FUNCTIONFS_ENABLE) {
++					ep_out_fd = open(EP1_OUT, O_RDWR);
++					ep_in_fd = open(EP1_IN, O_RDWR);
++					if (ep_out_fd < 0 || ep_in_fd < 0) {
++						perror("open endpoints");
++						break;
++					}
++					printf("Endpoints opened (out=%d, in=%d)\n",
++					       ep_out_fd, ep_in_fd);
++				} else if (event.type == FUNCTIONFS_DISABLE) {
++					if (ep_out_fd >= 0) { close(ep_out_fd); ep_out_fd = -1; }
++					if (ep_in_fd >= 0) { close(ep_in_fd); ep_in_fd = -1; }
++					printf("USB disconnected\n");
++				} else if (event.type == FUNCTIONFS_SETUP) {
++					printf("SETUP: bmReqType=0x%02x bReq=0x%02x"
++					       " wVal=0x%04x wIdx=0x%04x wLen=%d\n",
++					       event.u.setup.bRequestType,
++					       event.u.setup.bRequest,
++					       le16toh(event.u.setup.wValue),
++					       le16toh(event.u.setup.wIndex),
++					       le16toh(event.u.setup.wLength));
++				}
++			} else if (n > 0) {
++				printf("ep0 data: ");
++				for (ssize_t i = 0; i < n; i++)
++					printf("%02x ", buf[i]);
++				printf("\n");
++			} else if (n <= 0) {
++				perror("read ep0");
++				break;
++			}
++		}
++
++		if (pfds[1].revents & POLLIN && ep_out_fd >= 0) {
++			n = read(ep_out_fd, buf, sizeof(buf));
++			if (n > 0) {
++				printf("Received %zd bytes from host: ", n);
++				for (ssize_t i = 0; i < n && i < 32; i++)
++					printf("%c", buf[i] >= 32 ? buf[i] : '.');
++				printf("\n");
++
++				if (ep_in_fd >= 0) {
++					ssize_t w = write(ep_in_fd, buf, n);
++					if (w != n)
++						fprintf(stderr, "Echo write failed: %zd/%zd (errno=%d)\n",
++							w, n, errno);
++					else
++						printf("Echoed %zd bytes back to host\n", w);
++				}
++			} else if (n <= 0) {
++				perror("read ep_out");
++			}
++		}
++	}
++
++	if (ep_out_fd >= 0) close(ep_out_fd);
++	if (ep_in_fd >= 0) close(ep_in_fd);
++	close(ep0_fd);
++	return 0;
++}
+diff --git a/package/echo_gadget/echo_gadget.mk b/package/echo_gadget/echo_gadget.mk
+new file mode 100644
+index 0000000..30c8787
+--- /dev/null
++++ b/package/echo_gadget/echo_gadget.mk
+@@ -0,0 +1,20 @@
++################################################################################
++#
++# echo_gadget
++#
++################################################################################
++
++ECHO_GADGET_VERSION = 1.0
++ECHO_GADGET_SITE = $(ECHO_GADGET_PKGDIR)
++ECHO_GADGET_SITE_METHOD = local
++ECHO_GADGET_LICENSE = GPL-2.0
++
++define ECHO_GADGET_BUILD_CMDS
++	$(TARGET_CC) $(TARGET_CFLAGS) -o $(@D)/echo_gadget $(@D)/echo_gadget.c
++endef
++
++define ECHO_GADGET_INSTALL_TARGET_CMDS
++	$(INSTALL) -D -m 0755 $(@D)/echo_gadget $(TARGET_DIR)/usr/bin/echo_gadget
++endef
++
++$(eval $(generic-package))
+-- 
+2.54.0
+

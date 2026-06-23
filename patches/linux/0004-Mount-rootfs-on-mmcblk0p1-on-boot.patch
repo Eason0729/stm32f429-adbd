@@ -1,0 +1,60 @@
+From 8f73359030920ef2df6a1fa4301376a597e5b71f Mon Sep 17 00:00:00 2001
+From: Chisheng Chen <johnny1001s000602@gmail.com>
+Date: Mon, 27 Apr 2026 22:44:57 +0800
+Subject: [PATCH 4/9] Mount rootfs on mmcblk0 on boot
+
+---
+ arch/arm/boot/dts/st/stm32f4-pinctrl.dtsi | 4 ++--
+ arch/arm/boot/dts/st/stm32f429-disco.dts  | 6 +++---
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/arch/arm/boot/dts/st/stm32f4-pinctrl.dtsi b/arch/arm/boot/dts/st/stm32f4-pinctrl.dtsi
+index 3bb812d63..d34ad52c7 100644
+--- a/arch/arm/boot/dts/st/stm32f4-pinctrl.dtsi
++++ b/arch/arm/boot/dts/st/stm32f4-pinctrl.dtsi
+@@ -421,7 +421,7 @@ sdio_pins: sdio-pins-0 {
+ 				pins {
+ 					pinmux = <STM32_PINMUX('C', 8, AF12)>, /* SDIO_D0 */
+ 						 <STM32_PINMUX('C', 9, AF12)>, /* SDIO_D1 */
+-						 <STM32_PINMUX('C', 10, AF12)>, /* SDIO_D2 */
++						//  <STM32_PINMUX('C', 10, AF12)>, /* SDIO_D2 */
+ 						 <STM32_PINMUX('C', 11, AF12)>, /* SDIO_D3 */
+ 						 <STM32_PINMUX('C', 12, AF12)>, /* SDIO_CK */
+ 						 <STM32_PINMUX('D', 2, AF12)>; /* SDIO_CMD */
+@@ -434,7 +434,7 @@ sdio_pins_od: sdio-pins-od-0 {
+ 				pins1 {
+ 					pinmux = <STM32_PINMUX('C', 8, AF12)>, /* SDIO_D0 */
+ 						 <STM32_PINMUX('C', 9, AF12)>, /* SDIO_D1 */
+-						 <STM32_PINMUX('C', 10, AF12)>, /* SDIO_D2 */
++						//  <STM32_PINMUX('C', 10, AF12)>, /* SDIO_D2 */
+ 						 <STM32_PINMUX('C', 11, AF12)>, /* SDIO_D3 */
+ 						 <STM32_PINMUX('C', 12, AF12)>; /* SDIO_CK */
+ 					drive-push-pull;
+diff --git a/arch/arm/boot/dts/st/stm32f429-disco.dts b/arch/arm/boot/dts/st/stm32f429-disco.dts
+index bcc99716b..34d6cdd1a 100644
+--- a/arch/arm/boot/dts/st/stm32f429-disco.dts
++++ b/arch/arm/boot/dts/st/stm32f429-disco.dts
+@@ -58,7 +58,7 @@ / {
+ 	compatible = "st,stm32f429i-disco", "st,stm32f429";
+ 
+ 	chosen {
+-		bootargs = "root=mtd:romfs rootfstype=romfs ro";
++		bootargs = "root=/dev/mmcblk0 rootwait rootfstype=ext2 ro";
+ 		stdout-path = "serial0:115200n8";
+ 	};
+ 
+@@ -73,9 +73,9 @@ flash@8000000 {
+ 		bank-width = <4>;
+ 		#address-cells = <1>;
+ 
+-		partition@150000 {
++		partition@18d000 {
+ 			label = "romfs";
+-			reg = <0x150000 0xb0000>;
++			reg = <0x18d000 0x73000>;
+ 		};
+ 	};
+ 
+-- 
+2.43.0
+

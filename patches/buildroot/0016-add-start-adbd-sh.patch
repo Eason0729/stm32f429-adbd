@@ -1,0 +1,25 @@
+From: stm32f429-adbd
+Date: Tue, 23 Jun 2026 14:28:51 +0800
+Subject: add-start-adbd-sh
+
+---
+ board/stmicroelectronics/common/stm32f4xx/start_adbd.sh | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/board/stmicroelectronics/common/stm32f4xx/start_adbd.sh b/board/stmicroelectronics/common/stm32f4xx/start_adbd.sh
+index 80e4858..f42326c 100755
+--- a/board/stmicroelectronics/common/stm32f4xx/start_adbd.sh
++++ b/board/stmicroelectronics/common/stm32f4xx/start_adbd.sh
+@@ -1,5 +1,9 @@
+ #!/bin/sh
+ 
++# start_adbd.sh — Initialize USB gadget and launch adbd
++# This is called by init after pivot_root to set up the ADB
++# gadget via configfs and start the adbd daemon.
++
+ GADGET=/sys/kernel/config/usb_gadget/g1
+ 
+ # 1. Create gadget if not exists
+-- 
+2.54.0
+
