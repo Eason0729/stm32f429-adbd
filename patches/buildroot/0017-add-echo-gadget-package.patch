@@ -195,7 +195,7 @@ index 0000000..1160e0f
 +		perror("open UDC");
 +		return -1;
 +	}
-+	if (write(fd, "40040000.usb", 12) < 0) {
++	if (write(fd, "50000000.usb", 12) < 0) {
 +		perror("write UDC");
 +		close(fd);
 +		return -1;
