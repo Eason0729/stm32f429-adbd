@@ -13,7 +13,7 @@ new file mode 100755
 index 0000000..1b1b8bc
 --- /dev/null
 +++ b/board/stmicroelectronics/common/stm32f4xx/start_adbd.sh
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,35 @@
 +#!/bin/sh
 +
 +SERIAL="2501ABCDEFGHIJ"
@@ -49,6 +49,7 @@ index 0000000..1b1b8bc
 +sleep 3
 +UDC=$(ls /sys/class/udc)
 +echo "$UDC" > "$GADGET"/UDC
+
 diff --git a/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh b/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
 index c2e0930..461de3b 100755
 --- a/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
