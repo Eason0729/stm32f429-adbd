@@ -1,0 +1,186 @@
+From b0ff018f3a9e1acec64490b527347194ec1cb3c0 Mon Sep 17 00:00:00 2001
+From: x <x>
+Date: Thu, 25 Jun 2026 10:42:37 +0800
+Subject: dwc2: fix STM32F429 OTG_HS FS mode
+
+---
+ arch/arm/boot/dts/st/stm32f429-disco.dts |  8 +++++
+ drivers/usb/dwc2/core.c                  | 22 +++++-------
+ drivers/usb/dwc2/gadget.c                | 23 +++++++++++--
+ drivers/usb/dwc2/params.c                |  6 +++-
+ drivers/usb/dwc2/platform.c              | 44 ++++++++++++++++++++----
+ 5 files changed, 80 insertions(+), 23 deletions(-)
+
+diff --git a/arch/arm/boot/dts/st/stm32f429-disco.dts b/arch/arm/boot/dts/st/stm32f429-disco.dts
+index 748c746a1..25ed0c43e 100644
+--- a/arch/arm/boot/dts/st/stm32f429-disco.dts
++++ b/arch/arm/boot/dts/st/stm32f429-disco.dts
+@@ -280,3 +280,11 @@ &usart1 {
+ 	pinctrl-names = "default";
+ 	status = "okay";
+ };
++
++&usbotg_hs {
++	compatible = "st,stm32f4x9-fsotg";
++	dr_mode = "peripheral";
++	pinctrl-0 = <&usbotg_fs_pins_b>;
++	pinctrl-names = "default";
++	status = "okay";
++};
+diff --git a/drivers/usb/dwc2/core.c b/drivers/usb/dwc2/core.c
+index f375c5185..23ecfd214 100644
+--- a/drivers/usb/dwc2/core.c
++++ b/drivers/usb/dwc2/core.c
+@@ -1029,6 +1029,15 @@ static int dwc2_fs_phy_init(struct dwc2_hsotg *hsotg, bool select_phy)
+ 	if (select_phy) {
+ 		dev_dbg(hsotg->dev, "FS PHY selected\n");
+ 
++		if (hsotg->params.activate_stm_fs_transceiver) {
++			ggpio = dwc2_readl(hsotg, GGPIO);
++			if (!(ggpio & GGPIO_STM32_OTG_GCCFG_PWRDWN)) {
++				ggpio |= GGPIO_STM32_OTG_GCCFG_PWRDWN;
++				ggpio |= GGPIO_STM32_OTG_GCCFG_VBDEN;
++				dwc2_writel(hsotg, ggpio, GGPIO);
++			}
++		}
++
+ 		usbcfg = dwc2_readl(hsotg, GUSBCFG);
+ 		if (!(usbcfg & GUSBCFG_PHYSEL)) {
+ 			usbcfg |= GUSBCFG_PHYSEL;
+@@ -1045,19 +1054,6 @@ static int dwc2_fs_phy_init(struct dwc2_hsotg *hsotg, bool select_phy)
+ 				return retval;
+ 			}
+ 		}
+-
+-		if (hsotg->params.activate_stm_fs_transceiver) {
+-			ggpio = dwc2_readl(hsotg, GGPIO);
+-			if (!(ggpio & GGPIO_STM32_OTG_GCCFG_PWRDWN)) {
+-				dev_dbg(hsotg->dev, "Activating transceiver\n");
+-				/*
+-				 * STM32F4x9 uses the GGPIO register as general
+-				 * core configuration register.
+-				 */
+-				ggpio |= GGPIO_STM32_OTG_GCCFG_PWRDWN;
+-				dwc2_writel(hsotg, ggpio, GGPIO);
+-			}
+-		}
+ 	}
+ 
+ 	/*
+diff --git a/drivers/usb/dwc2/gadget.c b/drivers/usb/dwc2/gadget.c
+index c8b02c27d..b1e6809c5 100644
+--- a/drivers/usb/dwc2/gadget.c
++++ b/drivers/usb/dwc2/gadget.c
+@@ -3394,8 +3394,24 @@ void dwc2_hsotg_core_init_disconnected(struct dwc2_hsotg *hsotg,
+ 	kill_all_requests(hsotg, hsotg->eps_out[0], -ECONNRESET);
+ 
+ 	if (!is_usb_reset) {
+-		if (dwc2_core_reset(hsotg, true))
+-			return;
++		u32 v1;
++
++		if (hsotg->params.activate_stm_fs_transceiver) {
++			v1 = dwc2_readl(hsotg, GGPIO);
++			if (!(v1 & GGPIO_STM32_OTG_GCCFG_PWRDWN)) {
++				v1 |= GGPIO_STM32_OTG_GCCFG_PWRDWN;
++				dwc2_writel(hsotg, v1, GGPIO);
++			}
++		}
++
++		v1 = dwc2_readl(hsotg, GUSBCFG);
++		if (!(v1 & GUSBCFG_PHYSEL)) {
++			v1 |= GUSBCFG_PHYSEL;
++			dwc2_writel(hsotg, v1, GUSBCFG);
++
++			if (dwc2_core_reset(hsotg, true))
++				return;
++		}
+ 	} else {
+ 		/* all endpoints should be shutdown */
+ 		for (ep = 1; ep < hsotg->num_of_eps; ep++) {
+@@ -4579,6 +4595,9 @@ static int dwc2_hsotg_udc_start(struct usb_gadget *gadget,
+ 	hsotg->enabled = 0;
+ 	spin_unlock_irqrestore(&hsotg->lock, flags);
+ 
++	if (hsotg->dr_mode == USB_DR_MODE_PERIPHERAL)
++		usb_udc_vbus_handler(gadget, true);
++
+ 	gadget->sg_supported = using_desc_dma(hsotg);
+ 	dev_info(hsotg->dev, "bound driver %s\n", driver->driver.name);
+ 
+diff --git a/drivers/usb/dwc2/params.c b/drivers/usb/dwc2/params.c
+index 091bfcfef..9cc47612f 100644
+--- a/drivers/usb/dwc2/params.c
++++ b/drivers/usb/dwc2/params.c
+@@ -665,8 +665,12 @@ static void dwc2_check_param_phy_type(struct dwc2_hsotg *hsotg)
+ 		break;
+ 	}
+ 
+-	if (!valid)
++	if (!valid) {
++		if (hsotg->params.activate_stm_fs_transceiver &&
++		    hsotg->params.phy_type == DWC2_PHY_TYPE_PARAM_FS)
++			return;
+ 		dwc2_set_param_phy_type(hsotg);
++	}
+ }
+ 
+ static void dwc2_check_param_speed(struct dwc2_hsotg *hsotg)
+diff --git a/drivers/usb/dwc2/platform.c b/drivers/usb/dwc2/platform.c
+index ef0d73077..9598d776b 100644
+--- a/drivers/usb/dwc2/platform.c
++++ b/drivers/usb/dwc2/platform.c
+@@ -502,13 +502,43 @@ static int dwc2_driver_probe(struct platform_device *dev)
+ 	if (retval)
+ 		goto error;
+ 
+-	/*
+-	 * Reset before dwc2_get_hwparams() then it could get power-on real
+-	 * reset value form registers.
+-	 */
+-	retval = dwc2_core_reset(hsotg, false);
+-	if (retval)
+-		goto error;
++	if (!hsotg->phy) {
++		u32 v;
++		void __iomem *rcc_base = (void __iomem *)0x40023800;
++
++		/*
++		 * RM0090 35.13.3: Device init sequence has no CSRST step.
++		 * CSRST cannot complete when PHYSEL=1 (FS serial
++		 * transceiver mode). Use RCC hardware reset instead.
++		 */
++		writel(readl(rcc_base + 0x10) | BIT(29), rcc_base + 0x10);
++		readl(rcc_base + 0x10); udelay(10);
++		writel(readl(rcc_base + 0x10) & ~BIT(29), rcc_base + 0x10);
++		readl(rcc_base + 0x10); udelay(10);
++
++		/* Clear stale interrupts after hardware reset */
++		dwc2_writel(hsotg, 0xBFFFFFFF, GINTSTS);
++
++		/* Select FS embedded PHY */
++		v = dwc2_readl(hsotg, GUSBCFG);
++		v |= GUSBCFG_PHYSEL;
++		dwc2_writel(hsotg, v, GUSBCFG);
++
++		/* Activate transceiver */
++		v = dwc2_readl(hsotg, GGPIO);
++		v |= GGPIO_STM32_OTG_GCCFG_PWRDWN;
++		v |= GGPIO_STM32_OTG_GCCFG_VBDEN;
++		dwc2_writel(hsotg, v, GGPIO);
++
++		/* Force device mode */
++		v = dwc2_readl(hsotg, GUSBCFG);
++		v |= GUSBCFG_FORCEDEVMODE;
++		dwc2_writel(hsotg, v, GUSBCFG);
++	} else {
++		retval = dwc2_core_reset(hsotg, false);
++		if (retval)
++			goto error;
++	}
+ 
+ 	/* Detect config values from hardware */
+ 	retval = dwc2_get_hwparams(hsotg);
+-- 
+2.54.0
+

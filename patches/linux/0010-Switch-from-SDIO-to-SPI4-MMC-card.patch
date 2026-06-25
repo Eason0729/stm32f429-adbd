@@ -1,12 +1,12 @@
 From: stm32f429-adbd
 Date: Sun, 3 May 2026 00:00:00 +0800
-Subject: Switch from SDIO to SPI4 MMC card, disable display, add USB
- gadget on OTG_FS
+Subject: Switch from SDIO to SPI4 MMC card, disable display and
+ I2C3 touch
 
 ---
- arch/arm/boot/dts/st/stm32f429-disco.dts  | 16 insertions(+), 14 deletions(-)
- arch/arm/boot/dts/st/stm32f4-pinctrl.dtsi | 22 insertions(+), 0 deletions(-)
- 2 files changed, 38 insertions(+), 14 deletions(-)
+  arch/arm/boot/dts/st/stm32f429-disco.dts  | 13 insertions(+), 16 deletions(-)
+  arch/arm/boot/dts/st/stm32f4-pinctrl.dtsi | 14 insertions(+), 0 deletions(-)
+  2 files changed, 27 insertions(+), 16 deletions(-)
 
 diff --git a/arch/arm/boot/dts/st/stm32f429-disco.dts b/arch/arm/boot/dts/st/stm32f429-disco.dts
 index cda8a951d..1b5228f84 100644
@@ -56,40 +56,22 @@ index cda8a951d..1b5228f84 100644
  	pinctrl-0 = <&ltdc_pins_b>;
  	pinctrl-names = "default";
  
-@@ -277,10 +281,9 @@
+@@ -275,12 +275,4 @@
+ 	pinctrl-0 = <&usart1_pins_a>;
+ 	pinctrl-names = "default";
  	status = "okay";
  };
- 
+-
 -&usbotg_hs {
 -	compatible = "st,stm32f4x9-fsotg";
 -	dr_mode = "host";
 -	pinctrl-0 = <&usbotg_fs_pins_b>;
-+&usbotg_fs {
-+	dr_mode = "peripheral";
-+	pinctrl-0 = <&usbotg_fs_pins_periph>;
- 	pinctrl-names = "default";
- 	status = "okay";
- };
+-	pinctrl-names = "default";
+-	status = "okay";
+-};
 
 diff --git a/arch/arm/boot/dts/st/stm32f4-pinctrl.dtsi b/arch/arm/boot/dts/st/stm32f4-pinctrl.dtsi
-index befe48909..7828d7330 100644
-@@ -199,6 +199,16 @@
- 				};
- 			};
- 
-+			usbotg_fs_pins_periph: usbotg-fs-periph {
-+				pins {
-+					pinmux = <STM32_PINMUX('A', 11, AF10)>, /* OTG_FS_DM */
-+						 <STM32_PINMUX('A', 12, AF10)>; /* OTG_FS_DP */
-+					bias-disable;
-+					drive-push-pull;
-+					slew-rate = <2>;
-+				};
-+			};
-+
- 			usbotg_fs_pins_b: usbotg-fs-1 {
- 				pins {
- 					pinmux = <STM32_PINMUX('B', 12, AF12)>, /* OTG_HS_ID */
+index befe48909..92f9c5b93 100644
 @@ -382,6 +392,20 @@
  				};
  			};
