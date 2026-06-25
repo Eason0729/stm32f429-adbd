@@ -161,6 +161,9 @@ cp -a "${PATCH_DIR}"/adbd/*.patch package/adbd/ 2>/dev/null || true
 if ls "${PATCH_DIR}"/gcc/*.patch 2>/dev/null; then
     cp -a "${PATCH_DIR}"/gcc/*.patch package/gcc/14.3.0/
 fi
+if ls "${PATCH_DIR}"/uclibc/*.patch 2>/dev/null; then
+    cp -a "${PATCH_DIR}"/uclibc/*.patch package/uclibc/
+fi
 cp "${CONF_DIR}/buildroot.config" configs/stm32f429_disco_xip_defconfig
 cp "${CONF_DIR}/linux.config" board/stmicroelectronics/stm32f429-disco/
 cp "${CONF_DIR}/busybox-minimal.config" package/busybox/

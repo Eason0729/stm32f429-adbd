@@ -1,0 +1,36 @@
+From 3cbabab39cc9a62b44e65c51027fee58d464cd50 Mon Sep 17 00:00:00 2001
+From: Charles Mirabile <cmirabil@redhat.com>
+Date: Wed, 8 Apr 2026 15:00:35 -0400
+Subject: [PATCH] spawn: allow file actions on no-mmu targets
+
+This allows using posix_spawn to safely implement programs like a shell
+on a no-mmu system. Only libc knows enough about how things are actually
+working in a multi-threaded program to safely break the rules from POSIX
+about what is forbidden to do after calling vfork.
+
+Since we are libc, we know the exact semantics of vfork: that it is in
+fact safe to call into execute_file_actions and let it perform the few
+syscalls needed to perform file actions as they will not trash any global
+state.
+
+Fixes: 0dcf66744 ("librt: add posix_spawn support")
+Signed-off-by: Charles Mirabile <cmirabil@redhat.com>
+---
+ librt/spawn.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/librt/spawn.c b/librt/spawn.c
+index 4171f9bb5..3e7d7cd37 100644
+--- a/librt/spawn.c
++++ b/librt/spawn.c
+@@ -120,7 +120,7 @@ __spawni(pid_t *pid, const char *file,
+ 	short int flags = attrp ? attrp->__flags : 0;
+
+ 	pid_t new_pid;
+-	if (is_vfork_safe(flags) && !fa)
++	if (is_vfork_safe(flags))
+ 		new_pid = vfork();
+ 	else {
+ #ifdef __ARCH_USE_MMU__
+
+base-commit: 4e18ddb5316a8e00897ae8e3cda4e308316a79d0

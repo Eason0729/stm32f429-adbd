@@ -1,0 +1,77 @@
+From f7b9b110ba66684fc32e14c3353053bba5620d6e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E9=82=B1=E7=B9=BC=E5=8F=A1=20Eason=20CHIU?=
+ <30045503+Eason0729@users.noreply.github.com>
+Date: Thu, 25 Jun 2026 19:16:11 +0800
+Subject: [PATCH] fix use-after-free bug
+
+---
+ adb/shell_service.cpp |  9 +++++++++
+ adb/sockets.cpp       | 18 ++++++++++++++++--
+ 2 files changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/adb/shell_service.cpp b/adb/shell_service.cpp
+index d4addffac..427815fef 100644
+--- a/adb/shell_service.cpp
++++ b/adb/shell_service.cpp
+@@ -279,7 +279,16 @@ Subprocess::~Subprocess() {
+ bool Subprocess::ForkAndExec(std::string* error) {
+     unique_fd child_stdin_read, child_stdout_write, child_stderr_write;
+     unique_fd parent_error_sfd, child_error_sfd;
++#if defined(ADB_NOMMU)
++    ScratchBuf pts_name_buf(PATH_MAX);
++    char* pts_name = pts_name_buf.get();
++    if (!pts_name_buf.valid()) {
++        *error = "failed to allocate pts_name buffer";
++        return false;
++    }
++#else
+     char pts_name[PATH_MAX];
++#endif
+ 
+     if (command_.empty()) {
+         __android_log_security_bswrite(SEC_TAG_ADB_SHELL_INTERACTIVE, "");
+diff --git a/adb/sockets.cpp b/adb/sockets.cpp
+index b3aa9b2f4..ef20fd3d1 100644
+--- a/adb/sockets.cpp
++++ b/adb/sockets.cpp
+@@ -362,13 +362,26 @@ static void local_socket_event_func(int fd, unsigned ev, void* _s) {
+                 return;
+             }
+ 
+-            if (r > 0) {
++            /* enqueue may have freed s via the close cascade.
++             * Check if our socket ID is still registered. */
++            bool s_alive;
++            {
++                std::lock_guard<std::recursive_mutex> lock(local_socket_list_lock);
++                asocket* found = find_local_socket(saved_id, 0);
++                s_alive = (found == s);
++            }
++
++            if (r > 0 && s_alive) {
+                 /* if the remote cannot accept further events,
+                 ** we disable notification of READs.  They'll
+                 ** be enabled again when we get a call to ready()
+                 */
+                 fdevent_del(&s->fde, FDE_READ);
+             }
++
++            if (!s_alive) {
++                return;
++            }
+         }
+         /* Don't allow a forced eof if data is still there */
+         if ((s->fde.force_eof && !r) || is_eof) {
+@@ -692,7 +705,8 @@ static int smart_socket_enqueue(asocket* s, apacket* p) {
+     }
+ 
+     len = unhex(p->data, 4);
+-    if ((len < 1) || (len > MAX_PAYLOAD_V1)) {
++    // Reserve 1 byte for null terminator at data[len + 4].
++    if ((len < 1) || (len > MAX_PAYLOAD_V1 - 5)) {
+         D("SS(%d): bad size (%d)", s->id, len);
+         goto fail;
+     }
+-- 
+2.54.0
+

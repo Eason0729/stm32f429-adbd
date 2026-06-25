@@ -44,6 +44,11 @@ if ls "${PATCH_DIR}"/gcc/*.patch 2>/dev/null; then
     cp -a "${PATCH_DIR}"/gcc/*.patch "${BUILDROOT_DIR}/package/gcc/14.3.0/"
 fi
 
+echo "Installing uclibc patches into package/uclibc/..."
+if ls "${PATCH_DIR}"/uclibc/*.patch 2>/dev/null; then
+    cp -a "${PATCH_DIR}"/uclibc/*.patch "${BUILDROOT_DIR}/package/uclibc/"
+fi
+
 echo "Installing buildroot.config as defconfig..."
 cp "${CONF_DIR}/buildroot.config" \
     "${BUILDROOT_DIR}/configs/stm32f429_disco_xip_defconfig"
