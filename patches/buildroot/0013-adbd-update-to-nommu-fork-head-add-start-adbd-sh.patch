@@ -3,9 +3,9 @@ Date: Sun, 21 Jun 2026 22:57:09 +0800
 Subject: adbd: update to noMMU fork HEAD, add start_adbd.sh
 
 ---
- .../common/stm32f4xx/start_adbd.sh            | 32 +++++++++++++++++++
+ .../common/stm32f4xx/start_adbd.sh            | 34 +++++++++++++++++++
  .../common/stm32f4xx/stm32-post-build.sh      |  3 ++
- 2 files changed, 35 insertions(+)
+ 2 files changed, 37 insertions(+)
  create mode 100755 board/stmicroelectronics/common/stm32f4xx/start_adbd.sh
 
 diff --git a/board/stmicroelectronics/common/stm32f4xx/start_adbd.sh b/board/stmicroelectronics/common/stm32f4xx/start_adbd.sh
@@ -13,8 +13,10 @@ new file mode 100755
 index 0000000..1b1b8bc
 --- /dev/null
 +++ b/board/stmicroelectronics/common/stm32f4xx/start_adbd.sh
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,34 @@
 +#!/bin/sh
++
++SERIAL="2501ABCDEFGHIJ"
 +
 +GADGET=/sys/kernel/config/usb_gadget/g1
 +
@@ -24,8 +26,6 @@ index 0000000..1b1b8bc
 +    echo 0x18d1 > "$GADGET"/idVendor
 +    echo 0x4E26 > "$GADGET"/idProduct
 +    mkdir -p "$GADGET"/strings/0x409
-+    cat /sys/class/net/eth0/address 2>/dev/null \
-+        > "$GADGET"/strings/0x409/serialnumber
 +    echo "ST" > "$GADGET"/strings/0x409/manufacturer
 +    echo "STM32" > "$GADGET"/strings/0x409/product
 +    mkdir -p "$GADGET"/functions/ffs.adb
@@ -42,7 +42,10 @@ index 0000000..1b1b8bc
 +# 3. Start adbd (opens ep0, writes descriptors)
 +adbd &
 +
-+# 4. Wait for adbd to init, then enable UDC
++# 4. Fake serial number
++echo "$SERIAL" > "$GADGET"/strings/0x409/serialnumber
++
++# 5. Wait for adbd to init, then enable UDC
 +sleep 3
 +UDC=$(ls /sys/class/udc)
 +echo "$UDC" > "$GADGET"/UDC
