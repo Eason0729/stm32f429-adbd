@@ -1,0 +1,50 @@
+From: stm32f429-adbd
+Date: Thu, 25 Jun 2026 00:00:00 +0800
+Subject: adbd: add local adbd package build recipe
+
+Replace the old git-based adbd package (arduino/adbd) with a local
+package that builds adbd from the sources at package/adbd/ using
+noMMU-specific CFLAGS and NO_AUTH=1.
+
+---
+ package/adbd/adbd.mk | 30 ++++++++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+ create mode 100644 package/adbd/adbd.mk
+
+diff --git a/package/adbd/adbd.mk b/package/adbd/adbd.mk
+new file mode 100644
+index 0000000..a9e6a92
+--- /dev/null
++++ b/package/adbd/adbd.mk
+@@ -0,0 +1,31 @@
++################################################################################
++#
++# adbd
++#
++################################################################################
++
++ADBD_VERSION = 1.0
++ADBD_SITE = $(ADBD_PKGDIR)
++ADBD_SITE_METHOD = local
++ADBD_LICENSE = Apache-2.0
++
++define ADBD_BUILD_CMDS
++	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) \
++		CROSS_COMPILE=$(TARGET_CROSS) \
++		NO_AUTH=1 \
++		CFLAGS="$(TARGET_CFLAGS) -Os -ffunction-sections -fdata-sections -flto=auto \
++			-fno-unwind-tables -fno-asynchronous-unwind-tables \
++			-Wno-deprecated-declarations \
++			-DADBD_NO_AUTH -DADBD_NO_PTY -DADBD_NO_LISTENER \
++			-UHAVE_FORKEXEC -DHAVE_VFORKEXEC=1" \
++		LDFLAGS="$(TARGET_LDFLAGS) -static -Wl,--gc-sections -Wl,--strip-all \
++			-Wl,--dynamic-linker=/lib/ld-uClibc.so.1 \
++			-flto=auto -Wl,--no-eh-frame-hdr"
++endef
++
++define ADBD_INSTALL_TARGET_CMDS
++	$(INSTALL) -D -m 0755 $(@D)/adbd $(TARGET_DIR)/usr/bin/adbd
++	$(INSTALL) -D -m 0755 $(ADBD_PKGDIR)/start_adbd.sh $(TARGET_DIR)/usr/bin/start_adbd.sh
++endef
++
++$(eval $(generic-package))

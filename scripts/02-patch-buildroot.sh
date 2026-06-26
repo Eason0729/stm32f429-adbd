@@ -33,11 +33,18 @@ for p in "${PATCH_DIR}"/buildroot/*.patch; do
 done
 cd "${ROOT_DIR}"
 
-echo "Installing adbd patches into package/adbd/..."
-rm -f "${BUILDROOT_DIR}"/package/adbd/*.patch
-if ls "${PATCH_DIR}"/adbd/*.patch 2>/dev/null; then
-    cp -a "${PATCH_DIR}"/adbd/*.patch "${BUILDROOT_DIR}/package/adbd/"
-fi
+echo "Installing new adbd source into package/adbd/..."
+rm -rf "${BUILDROOT_DIR}"/package/adbd/src \
+       "${BUILDROOT_DIR}"/package/adbd/include \
+       "${BUILDROOT_DIR}"/package/adbd/Makefile \
+       "${BUILDROOT_DIR}"/package/adbd/start_adbd.sh \
+       "${BUILDROOT_DIR}"/package/adbd/*.patch \
+       "${BUILDROOT_DIR}"/package/adbd/adbd.hash \
+       "${BUILDROOT_DIR}"/package/adbd/adbd.hash.rej
+cp -a "${ROOT_DIR}"/adbd/src       "${BUILDROOT_DIR}/package/adbd/"
+cp -a "${ROOT_DIR}"/adbd/include   "${BUILDROOT_DIR}/package/adbd/"
+cp     "${ROOT_DIR}"/adbd/Makefile       "${BUILDROOT_DIR}/package/adbd/"
+cp     "${ROOT_DIR}"/adbd/start_adbd.sh  "${BUILDROOT_DIR}/package/adbd/"
 
 echo "Installing gcc patches into package/gcc/14.3.0/..."
 if ls "${PATCH_DIR}"/gcc/*.patch 2>/dev/null; then

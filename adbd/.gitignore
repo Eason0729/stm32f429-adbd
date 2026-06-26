@@ -1,0 +1,5 @@
+/adbd
+*.o
+/.cache
+/toolchain
+*.gdb

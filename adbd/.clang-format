@@ -1,0 +1,14 @@
+BasedOnStyle: LLVM
+SortIncludes: false
+IndentWidth: 4
+ColumnLimit: 0
+PointerAlignment: Left
+SpaceBeforeParens: Never
+BreakBeforeBraces: Linux
+AlignConsecutiveMacros: true
+AlignTrailingComments:
+  Kind: Leave
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortIfStatementsOnASingleLine: true
+AllowShortLoopsOnASingleLine: true
+UseTab: Never

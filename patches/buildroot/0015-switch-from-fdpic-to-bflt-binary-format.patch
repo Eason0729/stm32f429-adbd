@@ -1,16 +1,21 @@
 From: stm32f429-adbd
-Date: Mon, 22 Jun 2026 19:01:38 +0800
+Date: Mon, 22 Jun 2026 12:00:00 +0800
 Subject: Switch from FDPIC to bFLT binary format
 
+Switch the target strip tool from the FDPIC variant to the bFLT
+variant and harden busybox strip against failure.
+
 ---
+ .../common/stm32f4xx/stm32-post-build.sh           | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
 
 diff --git a/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh b/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
-index 461de3b..3c0dda4 100755
+index 319f3bf..3c0dda4 100755
 --- a/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
 +++ b/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
-@@ -29,13 +29,13 @@ rmdir "${TARGET_DIR}/usr/lib/ossl-modules" 2>/dev/null || true
- # Install USB gadget init script for adbd
- install -D -m 0755 "$(dirname "$0")/start_adbd.sh" "${TARGET_DIR}/usr/bin/start_adbd.sh"
+@@ -25,14 +25,14 @@ rm -f "${TARGET_DIR}/usr/lib/libssl.so"*
+ rm -f "${TARGET_DIR}/usr/lib/ossl-modules/legacy.so"
+ rmdir "${TARGET_DIR}/usr/lib/ossl-modules" 2>/dev/null || true
  
 -TARGET_STRIP="${TARGET_DIR}/../host/bin/arm-buildroot-uclinuxfdpiceabi-strip"
 +TARGET_STRIP="${TARGET_DIR}/../host/bin/arm-buildroot-uclinux-uclibcgnueabi-strip"
@@ -24,88 +29,3 @@ index 461de3b..3c0dda4 100755
 +        "${TARGET_STRIP}" --strip-unneeded "${TARGET_DIR}/bin/busybox" 2>/dev/null || true
      fi
  fi
--- 
-2.54.0
-diff --git a/package/adbd/Config.in b/package/adbd/Config.in
-index dc72c79..5726c05 100644
---- a/package/adbd/Config.in
-+++ b/package/adbd/Config.in
-@@ -4,8 +4,8 @@ config BR2_PACKAGE_ADBD
- 	select BR2_PACKAGE_OPENSSL
- 	help
- 	  Android Debug Bridge daemon, ported for embedded Linux via
--	  the arduino/adbd fork. Provides adb-over-USB using the Linux
-+	  the arduino/adbd fork. Provides adb-over-USB using the Linux
- 	  USB gadget FunctionFS interface so a host running `adb` can
- 	  shell into the board.
- 
--	  https://github.com/arduino/adbd
-\ No newline at end of file
-+	  https://github.com/arduino/adbd
-\ No newline at end of file
-diff --git a/package/adbd/adbd.hash b/package/adbd/adbd.hash
-index c601206..5675c94 100644
---- a/package/adbd/adbd.hash
-+++ b/package/adbd/adbd.hash
-@@ -1,4 +1,4 @@
- # Locally computed
--sha256  9c5526a00f728af546c7c1612c07f41220b7ac2510c121424038c21c134421b7  adbd-20776d8584bbc9ec81c24912c1041b7d1dd8de6a-git4.tar.gz
-+sha256  85836a6c4ed0870a6120a02d40e60646ce294a1fef6e8fe3932fdbd66ec4b890  adbd-07f091cd595d61555bb857096532c8a9d7d81291-git4.tar.gz
- sha256  5f28c11f8b1b3f97b9d42c74b85371ebf4127f241b799279bcecd69f7ee542dc  NOTICE
- sha256  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  MODULE_LICENSE_APACHE2
-\ No newline at end of file
-diff --git a/package/adbd/adbd.mk b/package/adbd/adbd.mk
-new file mode 100644
-index 0000000..43286de
---- /dev/null
-+++ b/package/adbd/adbd.mk
-@@ -0,0 +1,47 @@
-+################################################################################
-+#
-+# adbd
-+#
-+################################################################################
-+
-+ADBD_VERSION = 07f091cd595d61555bb857096532c8a9d7d81291
-+ADBD_SITE = https://github.com/arduino/adbd.git
-+ADBD_SITE_METHOD = git
-+ADBD_LICENSE = Apache-2.0
-+ADBD_LICENSE_FILES = MODULE_LICENSE_APACHE2 NOTICE
-+
-+# adbd uses a hand-written Makefile system, so we build and install it
-+# manually. The Makefiles use CC/CXX/AR/RANLIB from the environment.
-+ADBD_MAKE_ENV = \
-+	CC="$(TARGET_CC)" \
-+	CXX="$(TARGET_CXX)" \
-+	AR="$(TARGET_AR)" \
-+	RANLIB="$(TARGET_RANLIB)" \
-+	STRIP="$(TARGET_STRIP)" \
-+	ADB_NOMMU=1 \
-+	PIC_FLAGS="" \
-+	OPT_CFLAGS="$(TARGET_CFLAGS) \
-+		-Os \
-+		-ffunction-sections -fdata-sections \
-+		-Wno-deprecated-declarations -DALLOW_ADBD_NO_AUTH=1" \
-+	OPT_CXXFLAGS="$(TARGET_CXXFLAGS) \
-+		-Os \
-+		-ffunction-sections -fdata-sections \
-+		-fno-exceptions -fno-rtti \
-+		-std=gnu++14 \
-+		-Wno-deprecated-declarations -DALLOW_ADBD_NO_AUTH=1" \
-+	LFLAGS="$(TARGET_LDFLAGS) \
-+		-static \
-+		-Wl,--gc-sections \
-+		-Wl,--no-eh-frame-hdr \
-+		-latomic"
-+
-+define ADBD_BUILD_CMDS
-+	$(ADBD_MAKE_ENV) $(MAKE) -C $(@D) all
-+endef
-+
-+define ADBD_INSTALL_TARGET_CMDS
-+	$(INSTALL) -D -m 0755 $(@D)/adb/adbd $(TARGET_DIR)/usr/bin/adbd
-+endef
-+
-+$(eval $(generic-package))
--- 
-2.54.0

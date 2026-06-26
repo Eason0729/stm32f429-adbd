@@ -1,0 +1,13 @@
+[
+  {
+    "label": "Debug adbd",
+    "build": {
+      "command": "make",
+      "args": ["-j$(nproc)"],
+      "cwd": "$ZED_WORKTREE_ROOT"
+    },
+    "program": "$ZED_WORKTREE_ROOT/adbd",
+    "request": "launch",
+    "adapter": "CodeLLDB"
+  }
+]
